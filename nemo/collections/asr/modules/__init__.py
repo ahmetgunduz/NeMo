@@ -33,6 +33,7 @@ try:
         ECAPAEncoder,
         ParallelConvASREncoder,
         SpeakerDecoder,
+        CustomSpeakerDecoder,
     )
 except ModuleNotFoundError:
     from nemo.utils.exceptions import CheckInstall

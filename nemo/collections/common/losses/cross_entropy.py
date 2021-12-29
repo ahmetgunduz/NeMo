@@ -13,12 +13,21 @@
 # limitations under the License.
 
 import torch
-from torch import nn
+from torch import Tensor, nn
 
 from nemo.core.classes import Serialization, Typing, typecheck
-from nemo.core.neural_types import LabelsType, LogitsType, LogprobsType, LossType, MaskType, NeuralType
+from nemo.core.neural_types import (
+    LabelsType,
+    LogitsType,
+    LogprobsType,
+    LossType,
+    MaskType,
+    NeuralType,
+    RegressionValuesType,
+)
 
-__all__ = ['CrossEntropyLoss', 'NLLLoss']
+
+__all__ = ["CrossEntropyLoss", "NLLLoss", "CustomLoss"]
 
 
 class CrossEntropyLoss(nn.CrossEntropyLoss, Serialization, Typing):
@@ -28,21 +37,25 @@ class CrossEntropyLoss(nn.CrossEntropyLoss, Serialization, Typing):
 
     @property
     def input_types(self):
-        """Returns definitions of module input ports.
-        """
+        """Returns definitions of module input ports."""
         return {
-            "logits": NeuralType(['B'] + ['ANY'] * (self._logits_dim - 1), LogitsType()),
-            "labels": NeuralType(['B'] + ['ANY'] * (self._logits_dim - 2), LabelsType()),
-            "loss_mask": NeuralType(['B'] + ['ANY'] * (self._logits_dim - 2), MaskType(), optional=True),
+            "logits": NeuralType(
+                ["B"] + ["ANY"] * (self._logits_dim - 1), LogitsType()
+            ),
+            "labels": NeuralType(
+                ["B"] + ["ANY"] * (self._logits_dim - 2), LabelsType()
+            ),
+            "loss_mask": NeuralType(
+                ["B"] + ["ANY"] * (self._logits_dim - 2), MaskType(), optional=True
+            ),
         }
 
     @property
     def output_types(self):
-        """Returns definitions of module output ports.
-        """
+        """Returns definitions of module output ports."""
         return {"loss": NeuralType(elements_type=LossType())}
 
-    def __init__(self, logits_ndim=2, weight=None, reduction='mean', ignore_index=-100):
+    def __init__(self, logits_ndim=2, weight=None, reduction="mean", ignore_index=-100):
         """
         Args:
             logits_ndim (int): number of dimensions (or rank) of the logits tensor
@@ -79,6 +92,67 @@ class CrossEntropyLoss(nn.CrossEntropyLoss, Serialization, Typing):
         return loss
 
 
+class CustomLoss(nn.SmoothL1Loss, Serialization, Typing):
+    """
+    CustomLoss
+    """
+
+    @property
+    def input_types(self):
+        """Returns definitions of module input ports."""
+        return {
+            "preds": NeuralType(tuple("B"), RegressionValuesType()),
+            "labels": NeuralType(tuple("B"), LabelsType()),
+        }
+
+    @property
+    def output_types(self):
+        """Returns definitions of module output ports."""
+        return {"loss": NeuralType(elements_type=LossType())}
+
+    def __init__(self, reduction: str = "mean"):
+        """
+        Args:
+            reduction: type of the reduction over the batch
+        """
+        super().__init__(reduction=reduction)
+
+    @typecheck()
+    def forward(self, logits: Tensor, labels: Tensor, wers: Tensor) -> Tensor:
+        """
+        Args:
+            logits: output of the classifier
+            labels: ground truth labels (argmin(wers))
+            wers: word error rate list for the sample
+        #"""
+        # class_weight = {0:0.10488736, # 'aws'
+        #                 1:0.06675666, # 'azure'
+        #                 2:0.82835599  # 'google'
+        #               }
+
+        # sample_weight = compute_sample_weight("balanced", torch.argmax(wers, dim=1).tolist())
+        # sample_weight = torch.Tensor(sample_weight).to(logits.device)
+
+        wer_normalized = nn.functional.f.normalize(wers, p=1, dim=1)
+
+        SUPPLIER2COST = {
+            "aws": 0.024,
+            "azure": 0.017,
+            "google": 0.024,
+            "apptek": 0.0263,
+        }
+        COSTS = [
+            0.024,
+            0.017,
+            0.024,
+        ]
+
+        return super().forward(
+            torch.multiply(logits, wer_normalized).sum(dim=1),
+            torch.zeros((logits.shape[0])).to(logits.device),
+        )
+
+
 class NLLLoss(nn.NLLLoss, Serialization, Typing):
     """
     NLLLoss
@@ -86,8 +160,7 @@ class NLLLoss(nn.NLLLoss, Serialization, Typing):
 
     @property
     def input_types(self):
-        """Returns definitions of module input ports.
-        """
+        """Returns definitions of module input ports."""
         return {
             "log_probs": NeuralType(("B", "T", "D"), LogprobsType()),
             "labels": NeuralType(("B", "T"), LabelsType()),
@@ -96,11 +169,12 @@ class NLLLoss(nn.NLLLoss, Serialization, Typing):
 
     @property
     def output_types(self):
-        """Returns definitions of module output ports.
-        """
+        """Returns definitions of module output ports."""
         return {"loss": NeuralType(elements_type=LossType())}
 
-    def __init__(self, log_probs_ndim=2, weight=None, reduction='mean', ignore_index=-100):
+    def __init__(
+        self, log_probs_ndim=2, weight=None, reduction="mean", ignore_index=-100
+    ):
         """
         Args:
             log_probs_ndim (int): number of dimensions (or rank) of the logprobs tensor

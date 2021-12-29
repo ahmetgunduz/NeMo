@@ -19,14 +19,24 @@ import braceexpand
 import torch
 import webdataset as wd
 
-from nemo.collections.asr.parts.preprocessing.segment import available_formats as valid_sf_formats
+from nemo.collections.asr.parts.preprocessing.segment import (
+    available_formats as valid_sf_formats,
+)
 from nemo.collections.common.parts.preprocessing import collections
 from nemo.core.classes import Dataset, IterableDataset
-from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, NeuralType, RegressionValuesType
+from nemo.core.neural_types import (
+    AudioSignal,
+    LabelsType,
+    LengthsType,
+    NeuralType,
+    RegressionValuesType,
+)
 from nemo.utils import logging
 
 # List of valid file formats (prioritized by order of importance)
-VALID_FILE_FORMATS = ';'.join(['wav', 'mp3', 'flac'] + [fmt.lower() for fmt in valid_sf_formats.keys()])
+VALID_FILE_FORMATS = ";".join(
+    ["wav", "mp3", "flac"] + [fmt.lower() for fmt in valid_sf_formats.keys()]
+)
 
 
 def repeat_signal(signal, sig_len, required_length):
@@ -111,12 +121,12 @@ def _speech_collate_fn(batch, pad_id):
 
 def _fixed_seq_collate_fn(self, batch):
     """collate batch of audio sig, audio len, tokens, tokens len
-        Args:
-            batch (Optional[FloatTensor], Optional[LongTensor], LongTensor,
-                LongTensor):  A tuple of tuples of signal, signal lengths,
-                encoded tokens, and encoded tokens length.  This collate func
-                assumes the signals are 1d torch tensors (i.e. mono audio).
-        """
+    Args:
+        batch (Optional[FloatTensor], Optional[LongTensor], LongTensor,
+            LongTensor):  A tuple of tuples of signal, signal lengths,
+            encoded tokens, and encoded tokens length.  This collate func
+            assumes the signals are 1d torch tensors (i.e. mono audio).
+    """
     fixed_length = self.featurizer.sample_rate * self.time_length
     _, audio_lengths, _, tokens_lengths = zip(*batch)
 
@@ -137,7 +147,11 @@ def _fixed_seq_collate_fn(self, batch):
                 signal = torch.cat((rep_sig, sub))
                 new_audio_lengths.append(torch.tensor(fixed_length))
             else:
-                start_idx = torch.randint(0, chunck_len, (1,)) if chunck_len else torch.tensor(0)
+                start_idx = (
+                    torch.randint(0, chunck_len, (1,))
+                    if chunck_len
+                    else torch.tensor(0)
+                )
                 end_idx = start_idx + fixed_length
                 signal = sig[start_idx:end_idx]
                 new_audio_lengths.append(torch.tensor(fixed_length))
@@ -154,6 +168,58 @@ def _fixed_seq_collate_fn(self, batch):
     tokens_lengths = torch.stack(tokens_lengths)
 
     return audio_signal, audio_lengths, tokens, tokens_lengths
+
+
+def _custom_fixed_seq_collate_fn(self, batch):
+    """collate batch of audio sig, audio len, tokens, tokens len
+    Args:
+        batch (Optional[FloatTensor], Optional[LongTensor], LongTensor,
+            LongTensor):  A tuple of tuples of signal, signal lengths,
+            encoded tokens, and encoded tokens length.  This collate func
+            assumes the signals are 1d torch tensors (i.e. mono audio).
+    """
+    fixed_length = self.featurizer.sample_rate * self.time_length
+    _, audio_lengths, _, wers = zip(*batch)
+
+    has_audio = audio_lengths[0] is not None
+    fixed_length = int(min(fixed_length, max(audio_lengths)))
+
+    audio_signal, tokens, new_audio_lengths, wers = [], [], [], []
+    for sig, sig_len, tokens_i, wer in batch:
+        if has_audio:
+            sig_len = sig_len.item()
+            chunck_len = sig_len - fixed_length
+
+            if chunck_len < 0:
+                repeat = fixed_length // sig_len
+                rem = fixed_length % sig_len
+                sub = sig[-rem:] if rem > 0 else torch.tensor([])
+                rep_sig = torch.cat(repeat * [sig])
+                signal = torch.cat((rep_sig, sub))
+                new_audio_lengths.append(torch.tensor(fixed_length))
+            else:
+                start_idx = (
+                    torch.randint(0, chunck_len, (1,))
+                    if chunck_len
+                    else torch.tensor(0)
+                )
+                end_idx = start_idx + fixed_length
+                signal = sig[start_idx:end_idx]
+                new_audio_lengths.append(torch.tensor(fixed_length))
+
+            audio_signal.append(signal)
+        wers.append(torch.tensor(wer))
+        tokens.append(tokens_i)
+
+    if has_audio:
+        audio_signal = torch.stack(audio_signal)
+        audio_lengths = torch.stack(new_audio_lengths)
+    else:
+        audio_signal, audio_lengths = None, None
+    tokens = torch.stack(tokens)
+    wers = torch.stack(wers)
+
+    return audio_signal, audio_lengths, tokens, wers
 
 
 def _sliced_seq_collate_fn(self, batch, masked=False):
@@ -222,7 +288,7 @@ def _vad_frame_seq_collate_fn(self, batch):
         sig_len += slice_length
 
         if has_audio:
-            slices = torch.div(sig_len - slice_length, shift, rounding_mode='trunc')
+            slices = torch.div(sig_len - slice_length, shift, rounding_mode="trunc")
             for slice_id in range(slices):
                 start_idx = slice_id * shift
                 end_idx = start_idx + slice_length
@@ -272,30 +338,32 @@ target_label_n, "offset": offset_in_sec_n}
 
     @property
     def output_types(self) -> Optional[Dict[str, NeuralType]]:
-        """Returns definitions of module output ports.
-        """
+        """Returns definitions of module output ports."""
 
         output_types = {
-            'audio_signal': NeuralType(
-                ('B', 'T'),
+            "audio_signal": NeuralType(
+                ("B", "T"),
                 AudioSignal(freq=self._sample_rate)
-                if self is not None and hasattr(self, '_sample_rate')
+                if self is not None and hasattr(self, "_sample_rate")
                 else AudioSignal(),
             ),
-            'a_sig_length': NeuralType(tuple('B'), LengthsType()),
+            "a_sig_length": NeuralType(tuple("B"), LengthsType()),
         }
 
         if self.is_regression_task:
             output_types.update(
                 {
-                    'targets': NeuralType(tuple('B'), RegressionValuesType()),
-                    'targets_length': NeuralType(tuple('B'), LengthsType()),
+                    "targets": NeuralType(tuple("B"), RegressionValuesType()),
+                    "targets_length": NeuralType(tuple("B"), LengthsType()),
                 }
             )
         else:
 
             output_types.update(
-                {'label': NeuralType(tuple('B'), LabelsType()), 'label_length': NeuralType(tuple('B'), LengthsType()),}
+                {
+                    "label": NeuralType(tuple("B"), LabelsType()),
+                    "label_length": NeuralType(tuple("B"), LengthsType()),
+                }
             )
 
         return output_types
@@ -313,7 +381,7 @@ target_label_n, "offset": offset_in_sec_n}
     ):
         super().__init__()
         self.collection = collections.ASRSpeechLabel(
-            manifests_files=manifest_filepath.split(','),
+            manifests_files=manifest_filepath.split(","),
             min_duration=min_duration,
             max_duration=max_duration,
             is_regression_task=is_regression_task,
@@ -332,7 +400,11 @@ target_label_n, "offset": offset_in_sec_n}
                 self.id2label[label_id] = label
 
             for idx in range(len(self.labels[:5])):
-                logging.debug(" label id {} and its mapped label {}".format(idx, self.id2label[idx]))
+                logging.debug(
+                    " label id {} and its mapped label {}".format(
+                        idx, self.id2label[idx]
+                    )
+                )
 
         else:
             self.labels = []
@@ -349,7 +421,9 @@ target_label_n, "offset": offset_in_sec_n}
         if offset is None:
             offset = 0
 
-        features = self.featurizer.process(sample.audio_file, offset=offset, duration=sample.duration, trim=self.trim)
+        features = self.featurizer.process(
+            sample.audio_file, offset=offset, duration=sample.duration, trim=self.trim
+        )
         f, fl = features, torch.tensor(features.shape[0]).long()
 
         if not self.is_regression_task:
@@ -388,6 +462,194 @@ class AudioToClassificationLabelDataset(_AudioLabelDataset):
 
     def _collate_fn(self, batch):
         return _speech_collate_fn(batch, pad_id=0)
+
+
+class _CustomAudioLabelDataset(Dataset):
+    """
+    Dataset that loads tensors via a json file containing paths to audio files,
+    labels, and durations and offsets(in seconds). Each new line is a
+    different sample. Example below:
+    and their target labels. JSON files should be of the following format::
+        {"audio_filepath": "/path/to/audio_wav_0.wav", "duration": time_in_sec_0, "label": \
+target_label_0, "offset": offset_in_sec_0}
+        ...
+        {"audio_filepath": "/path/to/audio_wav_n.wav", "duration": time_in_sec_n, "label": \
+target_label_n, "offset": offset_in_sec_n}
+    Args:
+        manifest_filepath (str): Dataset parameter. Path to JSON containing data.
+        labels (list): Dataset parameter. List of target classes that can be output by the speaker recognition model.
+        featurizer
+        min_duration (float): Dataset parameter. All training files which have a duration less than min_duration
+            are dropped. Note: Duration is read from the manifest JSON.
+            Defaults to 0.1.
+        max_duration (float): Dataset parameter.
+            All training files which have a duration more than max_duration
+            are dropped. Note: Duration is read from the manifest JSON.
+            Defaults to None.
+        trim (bool): Whether to use trim silence from beginning and end of audio signal using librosa.effects.trim().
+            Defaults to False.
+    """
+
+    @property
+    def output_types(self) -> Optional[Dict[str, NeuralType]]:
+        """Returns definitions of module output ports."""
+
+        output_types = {
+            "audio_signal": NeuralType(
+                ("B", "T"),
+                AudioSignal(freq=self._sample_rate)
+                if self is not None and hasattr(self, "_sample_rate")
+                else AudioSignal(),
+            ),
+            "a_sig_length": NeuralType(tuple("B"), LengthsType()),
+        }
+
+        if self.is_regression_task:
+            output_types.update(
+                {
+                    "targets": NeuralType(tuple("B"), RegressionValuesType()),
+                    "targets_length": NeuralType(tuple("B"), LengthsType()), 
+                }
+            )
+        else:
+
+            output_types.update(
+                {
+                    "label": NeuralType(tuple("B"), LabelsType()),
+                    "label_length": NeuralType(tuple("B"), LengthsType()),
+                }
+            )
+
+        return output_types
+
+    def __init__(
+        self,
+        *,
+        manifest_filepath: str,
+        labels: List[str],
+        featurizer,
+        min_duration: Optional[float] = 0.1,
+        max_duration: Optional[float] = None,
+        trim: bool = False,
+    ):
+        super().__init__()
+        self.collection = collections.CustomASRSpeechLabel(
+            manifests_files=manifest_filepath.split(","),
+            min_duration=min_duration,
+            max_duration=max_duration,
+        )
+
+        self.featurizer = featurizer
+        self.trim = trim
+        self.labels = labels if labels else self.collection.uniq_labels
+        self.num_classes = len(self.labels) if self.labels is not None else 1
+        self.label2id, self.id2label = {}, {}
+        for label_id, label in enumerate(self.labels):
+            self.label2id[label] = label_id
+            self.id2label[label_id] = label
+
+        for idx in range(len(self.labels[:5])):
+            logging.debug(
+                " label id {} and its mapped label {}".format(idx, self.id2label[idx])
+            )
+
+    def __len__(self):
+        return len(self.collection)
+
+    def __getitem__(self, index):
+        sample = self.collection[index]
+        offset = sample.offset
+
+        if offset is None:
+            offset = 0
+
+        features = self.featurizer.process(
+            sample.audio_file, offset=offset, duration=sample.duration, trim=self.trim
+        )
+        f, fl = features, torch.tensor(features.shape[0]).long()
+
+        w = sample.wer
+
+        t = torch.tensor(self.label2id[sample.label]).long()
+
+        return f, fl, t, w
+
+
+class CustomAudioToSpeechLabelDataset(_CustomAudioLabelDataset):
+    """
+    Dataset that loads tensors via a json file containing paths to audio
+    files, command class, and durations (in seconds). Each new line is a
+    different sample. Example below:
+    {"audio_filepath": "/path/to/audio_wav_0.wav", "duration": time_in_sec_0, "label": \
+        target_label_0, "offset": offset_in_sec_0}
+    ...
+    {"audio_filepath": "/path/to/audio_wav_n.wav", "duration": time_in_sec_n, "label": \
+        target_label_n, "offset": offset_in_sec_n}
+    Args:
+        manifest_filepath (str): Path to manifest json as described above. Can
+            be comma-separated paths.
+        labels (Optional[list]): String containing all the possible labels to map to
+            if None then automatically picks from ASRSpeechLabel collection.
+        min_duration (float): Dataset parameter.
+            All training files which have a duration less than min_duration
+            are dropped. Note: Duration is read from the manifest JSON.
+            Defaults to 0.1.
+        max_duration (float): Dataset parameter.
+            All training files which have a duration more than max_duration
+            are dropped. Note: Duration is read from the manifest JSON.
+            Defaults to None.
+        trim (bool): Whether to use trim silence from beginning and end
+            of audio signal using librosa.effects.trim().
+            Defaults to False.
+        time_length (float): time length of slice (in seconds)
+            Use this for speaker recognition and VAD tasks.
+        shift_length (float): amount of shift of window for generating the frame for VAD task in a batch
+            Use this for VAD task during inference.
+        normalize_audio (bool): Whether to normalize audio signal.
+            Defaults to False.
+        is_regression_task (bool): Whether the dataset is for a regression task instead of classification
+    """
+
+    def __init__(
+        self,
+        *,
+        manifest_filepath: str,
+        labels: List[str],
+        featurizer,
+        min_duration: Optional[float] = 0.1,
+        max_duration: Optional[float] = None,
+        trim: bool = False,
+        time_length: Optional[float] = 8,
+        shift_length: Optional[float] = 1,
+        normalize_audio: bool = False,
+    ):
+        logging.info(
+            "Time length considered for collate func is {}".format(time_length)
+        )
+        logging.info(
+            "Shift length considered for collate func is {}".format(shift_length)
+        )
+        self.time_length = time_length
+        self.shift_length = shift_length
+        self.normalize_audio = normalize_audio
+
+        super().__init__(
+            manifest_filepath=manifest_filepath,
+            labels=labels,
+            featurizer=featurizer,
+            min_duration=min_duration,
+            max_duration=max_duration,
+            trim=trim,
+        )
+
+    def fixed_seq_collate_fn(self, batch):
+        return _custom_fixed_seq_collate_fn(self, batch)
+
+    def sliced_seq_collate_fn(self, batch):
+        return _sliced_seq_collate_fn(self, batch)
+
+    def vad_frame_seq_collate_fn(self, batch):
+        return _vad_frame_seq_collate_fn(self, batch)
 
 
 class AudioToSpeechLabelDataset(_AudioLabelDataset):
@@ -439,8 +701,12 @@ class AudioToSpeechLabelDataset(_AudioLabelDataset):
         normalize_audio: bool = False,
         is_regression_task: bool = False,
     ):
-        logging.info("Time length considered for collate func is {}".format(time_length))
-        logging.info("Shift length considered for collate func is {}".format(shift_length))
+        logging.info(
+            "Time length considered for collate func is {}".format(time_length)
+        )
+        logging.info(
+            "Shift length considered for collate func is {}".format(shift_length)
+        )
         self.time_length = time_length
         self.shift_length = shift_length
         self.normalize_audio = normalize_audio
@@ -575,21 +841,25 @@ class _TarredAudioLabelDataset(IterableDataset):
             self.id2label[label_id] = label
 
         for idx in range(len(self.labels[:5])):
-            logging.debug(" label id {} and its mapped label {}".format(idx, self.id2label[idx]))
+            logging.debug(
+                " label id {} and its mapped label {}".format(idx, self.id2label[idx])
+            )
 
-        valid_shard_strategies = ['scatter', 'replicate']
+        valid_shard_strategies = ["scatter", "replicate"]
         if shard_strategy not in valid_shard_strategies:
-            raise ValueError(f"`shard_strategy` must be one of {valid_shard_strategies}")
+            raise ValueError(
+                f"`shard_strategy` must be one of {valid_shard_strategies}"
+            )
 
         if isinstance(audio_tar_filepaths, str):
             # Replace '(' and '[' with '{'
-            brace_keys_open = ['(', '[', '<', '_OP_']
+            brace_keys_open = ["(", "[", "<", "_OP_"]
             for bkey in brace_keys_open:
                 if bkey in audio_tar_filepaths:
                     audio_tar_filepaths = audio_tar_filepaths.replace(bkey, "{")
 
             # Replace ')' and ']' with '}'
-            brace_keys_close = [')', ']', '>', '_CL_']
+            brace_keys_close = [")", "]", ">", "_CL_"]
             for bkey in brace_keys_close:
                 if bkey in audio_tar_filepaths:
                     audio_tar_filepaths = audio_tar_filepaths.replace(bkey, "}")
@@ -600,8 +870,10 @@ class _TarredAudioLabelDataset(IterableDataset):
                 # Brace expand
                 audio_tar_filepaths = list(braceexpand.braceexpand(audio_tar_filepaths))
 
-            if shard_strategy == 'scatter':
-                logging.info("All tarred dataset shards will be scattered evenly across all nodes.")
+            if shard_strategy == "scatter":
+                logging.info(
+                    "All tarred dataset shards will be scattered evenly across all nodes."
+                )
 
                 if len(audio_tar_filepaths) % world_size != 0:
                     logging.warning(
@@ -613,14 +885,21 @@ class _TarredAudioLabelDataset(IterableDataset):
                 end_idx = begin_idx + (len(audio_tar_filepaths) // world_size)
                 audio_tar_filepaths = audio_tar_filepaths[begin_idx:end_idx]
                 logging.info(
-                    "Partitioning tarred dataset: process (%d) taking shards [%d, %d)", global_rank, begin_idx, end_idx
+                    "Partitioning tarred dataset: process (%d) taking shards [%d, %d)",
+                    global_rank,
+                    begin_idx,
+                    end_idx,
                 )
 
-            elif shard_strategy == 'replicate':
-                logging.info("All tarred dataset shards will be replicated across all nodes.")
+            elif shard_strategy == "replicate":
+                logging.info(
+                    "All tarred dataset shards will be replicated across all nodes."
+                )
 
             else:
-                raise ValueError(f"Invalid shard strategy ! Allowed values are : {valid_shard_strategies}")
+                raise ValueError(
+                    f"Invalid shard strategy ! Allowed values are : {valid_shard_strategies}"
+                )
 
         # Put together WebDataset
         self._dataset = wd.WebDataset(urls=audio_tar_filepaths, nodesplitter=None)
@@ -631,8 +910,8 @@ class _TarredAudioLabelDataset(IterableDataset):
             logging.info("WebDataset will not shuffle files within the tar files.")
 
         self._dataset = (
-            self._dataset.rename(audio=VALID_FILE_FORMATS, key='__key__')
-            .to_tuple('audio', 'key')
+            self._dataset.rename(audio=VALID_FILE_FORMATS, key="__key__")
+            .to_tuple("audio", "key")
             .pipe(self._filter)
             .map(f=self._build_sample)
         )
@@ -689,8 +968,7 @@ class _TarredAudioLabelDataset(IterableDataset):
         return TarredAudioFilter(self.collection, self.file_occurence)
 
     def _build_sample(self, tup):
-        """Builds the training sample by combining the data from the WebDataset with the manifest info.
-        """
+        """Builds the training sample by combining the data from the WebDataset with the manifest info."""
         audio_bytes, audio_filename = tup
         # Grab manifest entry from self.collection
         file_id, _ = os.path.splitext(os.path.basename(audio_filename))
@@ -705,7 +983,10 @@ class _TarredAudioLabelDataset(IterableDataset):
         # Convert audio bytes to IO stream for processing (for SoundFile to read)
         audio_filestream = io.BytesIO(audio_bytes)
         features = self.featurizer.process(
-            audio_filestream, offset=offset, duration=manifest_entry.duration, trim=self.trim,
+            audio_filestream,
+            offset=offset,
+            duration=manifest_entry.duration,
+            trim=self.trim,
         )
 
         audio_filestream.close()
@@ -880,8 +1161,12 @@ class TarredAudioToSpeechLabelDataset(_TarredAudioLabelDataset):
         global_rank: int = 0,
         world_size: int = 0,
     ):
-        logging.info("Time length considered for collate func is {}".format(time_length))
-        logging.info("Shift length considered for collate func is {}".format(shift_length))
+        logging.info(
+            "Time length considered for collate func is {}".format(time_length)
+        )
+        logging.info(
+            "Shift length considered for collate func is {}".format(shift_length)
+        )
         self.time_length = time_length
         self.shift_length = shift_length
         self.normalize_audio = normalize_audio

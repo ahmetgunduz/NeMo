@@ -5,7 +5,7 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-#
+# 
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from nemo.collections.common.losses.aggregator import AggregatorLoss
-from nemo.collections.common.losses.cross_entropy import CrossEntropyLoss, NLLLoss
+from nemo.collections.common.losses.cross_entropy import CrossEntropyLoss, NLLLoss, CustomLoss
 from nemo.collections.common.losses.mse_loss import MSELoss
 from nemo.collections.common.losses.multi_similarity_loss import MultiSimilarityLoss
 from nemo.collections.common.losses.smoothed_cross_entropy import SmoothedCrossEntropyLoss
