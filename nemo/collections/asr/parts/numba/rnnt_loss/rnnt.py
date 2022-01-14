@@ -44,7 +44,6 @@ def rnnt_loss_cpu(
     costs: torch.Tensor,
     grads: torch.Tensor,
     blank_label: int,
-    fastemit_lambda: float,
     num_threads: int,
 ):
     """
@@ -60,8 +59,6 @@ def rnnt_loss_cpu(
         costs: Zero vector of length [B] in which costs will be set.
         grads: Zero tensor of shape [B, T, U, V+1] where the gradient will be set.
         blank_label: Index of the blank token in the vocabulary.
-        fastemit_lambda: Float scaling factor for FastEmit regularization. Refer to
-            FastEmit: Low-latency Streaming ASR with Sequence-level Emission Regularization.
         num_threads: Number of threads for OpenMP.
     """
     # aliases
@@ -95,7 +92,6 @@ def rnnt_loss_cpu(
         alphabet_size=alphabet_size,
         workspace=cpu_workspace,
         blank=blank_label,
-        fastemit_lambda=fastemit_lambda,
         num_threads=num_threads,
         batch_first=True,
     )
@@ -140,7 +136,6 @@ def rnnt_loss_gpu(
     costs: torch.Tensor,
     grads: torch.Tensor,
     blank_label: int,
-    fastemit_lambda: float,
     num_threads: int,
 ):
     """
@@ -156,8 +151,6 @@ def rnnt_loss_gpu(
         costs: Zero vector of length [B] in which costs will be set.
         grads: Zero tensor of shape [B, T, U, V+1] where the gradient will be set.
         blank_label: Index of the blank token in the vocabulary.
-        fastemit_lambda: Float scaling factor for FastEmit regularization. Refer to
-            FastEmit: Low-latency Streaming ASR with Sequence-level Emission Regularization.
         num_threads: Number of threads for OpenMP.
     """
     minibatch_size = acts.shape[0]
@@ -196,7 +189,6 @@ def rnnt_loss_gpu(
         alphabet_size=alphabet_size,
         workspace=gpu_workspace,
         blank=blank_label,
-        fastemit_lambda=fastemit_lambda,
         num_threads=num_threads,
         stream=stream,
     )

@@ -6,18 +6,18 @@ INSTALL_OPTION=${1:-"dev"}
 
 PIP=pip
 
-echo 'Uninstalling stuff'
-${PIP} uninstall -y nemo_toolkit
-${PIP} uninstall -y sacrebleu
+# echo 'Uninstalling stuff'
+# ${PIP} uninstall -y nemo_toolkit
+# ${PIP} uninstall -y sacrebleu
 
-# Kept for legacy purposes
-${PIP} uninstall -y nemo_asr
-${PIP} uninstall -y nemo_nlp
-${PIP} uninstall -y nemo_tts
-${PIP} uninstall -y nemo_simple_gan
-${PIP} uninstall -y nemo_cv
+# # Kept for legacy purposes
+# ${PIP} uninstall -y nemo_asr
+# ${PIP} uninstall -y nemo_nlp
+# ${PIP} uninstall -y nemo_tts
+# ${PIP} uninstall -y nemo_simple_gan
+# ${PIP} uninstall -y nemo_cv
 
-${PIP} install -U setuptools
+${PIP} install -U setuptools==59.5.0
 
 echo 'Installing nemo and nemo_text_processing'
 if [[ "$INSTALL_OPTION" == "dev" ]]; then

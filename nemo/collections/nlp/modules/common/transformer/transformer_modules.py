@@ -17,15 +17,12 @@
 import math
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 from omegaconf.omegaconf import MISSING
 from torch import nn
 from torch.nn.functional import gelu
 
-from nemo.collections.common.parts import form_attention_mask
-
-__all__ = ["TransformerEmbedding", "AttentionBridge"]
+__all__ = ["TransformerEmbedding"]
 
 
 class FixedPositionalEncoding(nn.Module):
@@ -41,15 +38,7 @@ class FixedPositionalEncoding(nn.Module):
     def __init__(self, hidden_size, max_sequence_length=512):
         super().__init__()
 
-        self._hidden_size = hidden_size
-        self._max_sequence_length = max_sequence_length
-        self._build_pos_enc(hidden_size=self._hidden_size, max_sequence_length=self._max_sequence_length)
-
-    def _build_pos_enc(self, hidden_size, max_sequence_length, device=None):
-        """
-        Builds/replaces pre-computed positional encoding.
-        """
-        pos_enc = torch.zeros(max_sequence_length, hidden_size, device=device)
+        pos_enc = torch.zeros(max_sequence_length, hidden_size)
         position = torch.arange(0.0, max_sequence_length).unsqueeze(1)
         coef = -math.log(10000.0) / hidden_size
         div_term = torch.exp(coef * torch.arange(0.0, hidden_size, 2))
@@ -59,16 +48,6 @@ class FixedPositionalEncoding(nn.Module):
         self.register_buffer('pos_enc', pos_enc)
 
     def forward(self, position_ids):
-        max_pos_id = position_ids.max()
-        # update positional encoding if needed
-        if max_pos_id >= self._max_sequence_length:
-            self._max_sequence_length = max_pos_id + 1
-            self._build_pos_enc(
-                hidden_size=self._hidden_size,
-                max_sequence_length=self._max_sequence_length,
-                device=position_ids.device,
-            )
-
         return torch.embedding(self.pos_enc, position_ids)
 
 
@@ -100,7 +79,6 @@ class TransformerEmbedding(nn.Module):
         super().__init__()
 
         self.max_sequence_length = max_sequence_length
-        self.learn_positional_encodings = learn_positional_encodings
         self.token_embedding = nn.Embedding(vocab_size, hidden_size, padding_idx=0)
         if learn_positional_encodings:
             self.position_embedding = nn.Embedding(max_sequence_length, hidden_size)
@@ -113,8 +91,7 @@ class TransformerEmbedding(nn.Module):
 
     def forward(self, input_ids, token_type_ids=None, start_pos=0):
         seq_length = input_ids.size(1)
-        # we fail here only with parametric positional embedding. FixedPositionalEncoding automatically extends.
-        if self.learn_positional_encodings and (seq_length > self.max_sequence_length):
+        if seq_length > self.max_sequence_length:
             raise ValueError(
                 f"Input sequence is longer than maximum allowed sequence length for positional encoding. "
                 f"Got {seq_length} and {self.max_sequence_length}"
@@ -231,57 +208,3 @@ class PositionWiseFF(nn.Module):
         output_states = self.dense_out(output_states)
         output_states = self.layer_dropout(output_states)
         return output_states
-
-
-class AttentionBridge(torch.nn.Module):
-    """
-    A multi-head attention bridge to project a variable-size hidden states
-    to k hidden states (per attention head).
-
-    Code is based on the paper https://arxiv.org/pdf/1703.03130.pdf
-    """
-
-    def __init__(self, hidden_size, k, bridge_size):
-        """
-        hidden_size - size of input hidden state
-        k - number of attention heads
-        bridge_size - size of internal feed forward weights (i.e., attention head size)
-        """
-        super().__init__()
-
-        self.hidden_size = hidden_size
-        self.k = k
-        self.bridge_size = bridge_size
-
-        self.attn_scale = np.sqrt(np.sqrt(self.bridge_size))
-
-        # build model
-
-        self.W1 = torch.nn.Linear(hidden_size, bridge_size, bias=False)
-        self.W2 = torch.nn.Linear(bridge_size, k, bias=False)
-        self.act = torch.nn.ReLU()
-
-    def forward(self, hidden, hidden_mask=None, return_ortho_loss=False):
-        """
-        Project hidden [B x N x H] to fixed-size [B x k x H]
-
-        return_ortho_loss - if True returns loss term to encourage
-                              orthogonal attention vectors
-        """
-
-        attention_scores = self.W2(self.act(self.W1(hidden) / self.attn_scale) / self.attn_scale).transpose(-1, -2)
-
-        attention_mask = form_attention_mask(hidden_mask)
-        if attention_mask is not None:
-            attention_mask.squeeze_(1)
-            attention_scores = attention_scores + attention_mask.to(attention_scores.dtype)
-
-        A = torch.softmax(attention_scores, dim=-1)
-        M = A @ hidden
-
-        if return_ortho_loss:
-            ortho_loss = ((A @ A.transpose(-1, -2)) - torch.eye(self.k).type_as(A)).pow(2).sum()
-
-            return M, ortho_loss
-        else:
-            return M

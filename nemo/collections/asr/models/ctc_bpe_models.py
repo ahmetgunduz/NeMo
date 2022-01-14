@@ -18,7 +18,6 @@ from typing import Dict, Optional
 
 import torch
 from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
-from torch.utils.data import ChainDataset
 
 from nemo.collections.asr.data import audio_to_text_dataset
 from nemo.collections.asr.losses.ctc import CTCLoss
@@ -97,27 +96,6 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
         results.append(model)
 
         model = PretrainedModelInfo(
-            pretrained_model_name="stt_de_citrinet_1024",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_de_citrinet_1024",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_de_citrinet_1024/versions/1.3.2/files/stt_de_citrinet_1024.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_fr_citrinet_1024_gamma_0_25",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_fr_citrinet_1024_gamma_0_25",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_fr_citrinet_1024_gamma_0_25/versions/1.5/files/stt_fr_citrinet_1024_gamma_0_25.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_fr_no_hyphen_citrinet_1024_gamma_0_25",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_fr_citrinet_1024_gamma_0_25",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_fr_citrinet_1024_gamma_0_25/versions/1.5/files/stt_fr_no_hyphen_citrinet_1024_gamma_0_25.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
             pretrained_model_name="stt_en_conformer_ctc_small",
             description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_conformer_ctc_small",
             location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_ctc_small/versions/1.0.0/files/stt_en_conformer_ctc_small.nemo",
@@ -156,27 +134,6 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
             pretrained_model_name="stt_en_conformer_ctc_large_ls",
             description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_conformer_ctc_large_ls",
             location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_ctc_large_ls/versions/1.0.0/files/stt_en_conformer_ctc_large_ls.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_fr_conformer_ctc_large",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_fr_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_fr_conformer_ctc_large/versions/1.5.1/files/stt_fr_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_fr_no_hyphen_conformer_ctc_large",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_fr_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_fr_conformer_ctc_large/versions/1.5.1/files/stt_fr_no_hyphen_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_de_conformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_de_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_de_conformer_ctc_large/versions/1.5.0/files/stt_de_conformer_ctc_large.nemo",
         )
         results.append(model)
 
@@ -230,19 +187,6 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
             augmentor = None
 
         shuffle = config['shuffle']
-        device = 'gpu' if torch.cuda.is_available() else 'cpu'
-        if config.get('use_dali', False):
-            device_id = self.local_rank if device == 'gpu' else None
-            dataset = audio_to_text_dataset.get_dali_bpe_dataset(
-                config=config,
-                tokenizer=self.tokenizer,
-                shuffle=shuffle,
-                device_id=device_id,
-                global_rank=self.global_rank,
-                world_size=self.world_size,
-                preprocessor_cfg=self._cfg.preprocessor,
-            )
-            return dataset
 
         # Instantiate tarred dataset loader or normal dataset loader
         if config.get('is_tarred', False):
@@ -256,7 +200,7 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
                 return None
 
             shuffle_n = config.get('shuffle_n', 4 * config['batch_size']) if shuffle else 0
-            dataset = audio_to_text_dataset.get_tarred_dataset(
+            dataset = audio_to_text_dataset.get_tarred_bpe_dataset(
                 config=config,
                 tokenizer=self.tokenizer,
                 shuffle_n=shuffle_n,
@@ -273,15 +217,11 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
             dataset = audio_to_text_dataset.get_bpe_dataset(
                 config=config, tokenizer=self.tokenizer, augmentor=augmentor
             )
-        if type(dataset) is ChainDataset:
-            collate_fn = dataset.datasets[0].collate_fn
-        else:
-            collate_fn = dataset.collate_fn
 
         return torch.utils.data.DataLoader(
             dataset=dataset,
             batch_size=config['batch_size'],
-            collate_fn=collate_fn,
+            collate_fn=dataset.collate_fn,
             drop_last=config.get('drop_last', False),
             shuffle=shuffle,
             num_workers=config.get('num_workers', 0),
@@ -304,15 +244,11 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
         Returns:
             A pytorch DataLoader for the given audio file(s).
         """
-        batch_size = min(config['batch_size'], len(config['paths2audio_files']))
         dl_config = {
             'manifest_filepath': os.path.join(config['temp_dir'], 'manifest.json'),
             'sample_rate': self.preprocessor._sample_rate,
-            'batch_size': batch_size,
+            'batch_size': min(config['batch_size'], len(config['paths2audio_files'])),
             'shuffle': False,
-            'num_workers': min(batch_size, os.cpu_count() - 1),
-            'pin_memory': True,
-            'use_start_end_token': self.cfg.validation_ds.get('use_start_end_token', False),
         }
 
         temporary_datalayer = self._setup_dataloader_from_config(config=DictConfig(dl_config))

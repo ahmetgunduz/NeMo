@@ -256,6 +256,5 @@ class WaveGlowModel(GlowVocoder, Exportable):
         # and can be computed from convinv.conv.weight
         # Ideally, we should remove this during saving instead of ignoring during loading
         for i in range(self._cfg.waveglow.n_flows):
-            if f"waveglow.convinv.{i}.inv_conv.weight" in state_dict:
-                del state_dict[f"waveglow.convinv.{i}.inv_conv.weight"]
+            del state_dict[f"waveglow.convinv.{i}.inv_conv.weight"]
         super().load_state_dict(state_dict, strict=strict)

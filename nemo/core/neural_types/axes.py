@@ -51,17 +51,13 @@ class AxisKind(AxisKindAbstract):
     def __str__(self):
         return str(self.name).lower()
 
-    def t_with_string(self, text):
-        # it checks if text is "t_<any string>"
-        return text.startswith("t_") and text.endswith("_") and text[2:-1] == self.__str__()
-
     @staticmethod
     def from_str(label):
         """Returns AxisKind instance based on short string representation"""
         _label = label.lower().strip()
         if _label == "b" or _label == "n" or _label == "batch":
             return AxisKind.Batch
-        elif _label == "t" or _label == "time" or (len(_label) > 2 and _label.startswith("t_")):
+        elif _label == "t" or _label == "time":
             return AxisKind.Time
         elif _label == "d" or _label == "c" or _label == "channel":
             return AxisKind.Dimension
@@ -71,8 +67,6 @@ class AxisKind(AxisKindAbstract):
             return AxisKind.Height
         elif _label == "s" or _label == "singleton":
             return AxisKind.Singleton
-        elif _label == "seq" or _label == "sequence":
-            return AxisKind.Sequence
         elif _label == "flowgroup":
             return AxisKind.FlowGroup
         elif _label == "any":

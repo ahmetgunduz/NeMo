@@ -1,4 +1,4 @@
-# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-CXXFLAGS += -O3 -Wall -shared -std=c++11 -fPIC -fdiagnostics-color
-CPPFLAGS += $(shell python3 -m pybind11 --includes)
-LIBNAME = helpers
-LIBEXT = $(shell python3-config --extension-suffix)
 
-default: $(LIBNAME)$(LIBEXT)
-
-%$(LIBEXT): %.cpp
-	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $< -o $@
+from nemo.collections.nlp.data.neural_machine_translation.neural_machine_translation_dataset import (
+    NeuralMachineTranslationDataset,
+)

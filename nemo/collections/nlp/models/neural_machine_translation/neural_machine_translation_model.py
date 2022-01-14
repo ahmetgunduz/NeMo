@@ -24,17 +24,17 @@ from pytorch_lightning import Trainer
 from transformers import AutoModel, BartForConditionalGeneration, EncoderDecoderModel
 
 from nemo.collections.common.metrics import Perplexity
-from nemo.collections.nlp.data.text2sparql import Text2SparqlDataset
+from nemo.collections.nlp.data.neural_machine_translation import NeuralMachineTranslationDataset
 from nemo.collections.nlp.modules.common.tokenizer_utils import get_tokenizer
 from nemo.core.classes.common import typecheck
 from nemo.core.classes.modelPT import ModelPT
 from nemo.core.neural_types import ChannelType, LossType, MaskType, NeuralType
 from nemo.utils import logging
 
-__all__ = ["Text2SparqlModel"]
+__all__ = ["NeuralMachineTranslationModel"]
 
 
-class Text2SparqlModel(ModelPT):
+class NeuralMachineTranslationModel(ModelPT):
     @property
     def input_types(self) -> Optional[Dict[str, NeuralType]]:
         return {
@@ -42,6 +42,14 @@ class Text2SparqlModel(ModelPT):
             "attention_mask": NeuralType(('B', 'T'), MaskType(), optional=True),
             "decoder_input_ids": NeuralType(('B', 'T'), ChannelType(), optional=True),
             "labels": NeuralType(('B', 'T'), ChannelType(), optional=True),
+        }
+
+    @property
+    def output_types(self) -> Optional[Dict[str, NeuralType]]:
+        return {
+            "loss": NeuralType((), LossType()),
+            "decoder_hidden_states": NeuralType(("B", "T", "D"), ChannelType(), optional=True),
+            "encoder_hidden_states": NeuralType(("B", "T", "D"), ChannelType(), optional=True),
         }
 
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
@@ -177,7 +185,6 @@ class Text2SparqlModel(ModelPT):
         perplexity = self.validation_perplexity.compute()
         tensorboard_logs = {"val_loss": avg_loss, "perplexity": perplexity}
         logging.info(f"evaluation perplexity {perplexity.item()}")
-        self.log("val_loss", avg_loss)
         return {"val_loss": avg_loss, "log": tensorboard_logs}
 
     @typecheck.disable_checks()
@@ -191,7 +198,6 @@ class Text2SparqlModel(ModelPT):
     def test_epoch_end(self, outputs: List[torch.Tensor]) -> Dict[str, List[str]]:
         """Called at the end of test to aggregate outputs and decode them."""
         texts = [self.encoder_tokenizer.ids_to_text(seq) for batch in outputs for seq in batch]
-        self.test_output = [{"texts": texts}]
         return {"texts": texts}
 
     def setup_tokenizer(self, cfg: DictConfig):
@@ -213,7 +219,7 @@ class Text2SparqlModel(ModelPT):
         self._test_dl = self.setup_dataloader_from_config(cfg=test_data_config)
 
     def setup_dataloader_from_config(self, cfg: DictConfig):
-        dataset = Text2SparqlDataset(
+        dataset = NeuralMachineTranslationDataset(
             filepath=cfg.filepath,
             encoder_tokenizer=self.encoder_tokenizer,
             decoder_tokenizer=self.decoder_tokenizer,

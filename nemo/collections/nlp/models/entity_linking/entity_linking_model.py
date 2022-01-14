@@ -40,7 +40,11 @@ class EntityLinkingModel(NLPModel, Exportable):
 
     @property
     def input_types(self) -> Optional[Dict[str, NeuralType]]:
-        return self.model.input_types
+        return {
+            "input_ids": NeuralType(('B', 'T'), ChannelType()),
+            "attention_mask": NeuralType(('B', 'T'), MaskType(), optional=True),
+            "token_type_ids": NeuralType(('B', 'T'), ChannelType(), optional=True),
+        }
 
     @property
     def output_types(self) -> Optional[Dict[str, NeuralType]]:

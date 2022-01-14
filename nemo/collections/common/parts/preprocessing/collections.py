@@ -15,6 +15,7 @@
 import collections
 import json
 import os
+import ast
 from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
@@ -312,8 +313,7 @@ class CustomSpeechLabel(_Collection):
                 data.sort(key=lambda entity: entity.duration)
 
         logging.info(
-            "Filtered duration for loading collection is %f.",
-            duration_filtered,
+            "Filtered duration for loading collection is %f.", duration_filtered,
         )
         self.uniq_labels = sorted(set(map(lambda x: x.label, data)))
         logging.info(
@@ -329,8 +329,7 @@ class SpeechLabel(_Collection):
     """List of audio-label correspondence with preprocessing."""
 
     OUTPUT_TYPE = collections.namedtuple(
-        typename="SpeechLabelEntity",
-        field_names="audio_file duration label offset",
+        typename="SpeechLabelEntity", field_names="audio_file duration label offset",
     )
 
     def __init__(
@@ -394,8 +393,7 @@ class SpeechLabel(_Collection):
                 data.sort(key=lambda entity: entity.duration)
 
         logging.info(
-            "Filtered duration for loading collection is %f.",
-            duration_filtered,
+            "Filtered duration for loading collection is %f.", duration_filtered,
         )
         self.uniq_labels = sorted(set(map(lambda x: x.label, data)))
         logging.info(
@@ -405,82 +403,6 @@ class SpeechLabel(_Collection):
         )
 
         super().__init__(data)
-
-
-class CustomASRSpeechLabel(CustomSpeechLabel):
-    """`SpeechLabel` collector from structured json files."""
-
-    def __init__(self, manifests_files: Union[str, List[str]], *args, **kwargs):
-        """Parse lists of audio files, durations and transcripts texts.
-
-        Args:
-            manifests_files: Either single string file or list of such -
-                manifests to yield items from.
-            is_regression_task: It's a regression task
-            *args: Args to pass to `SpeechLabel` constructor.
-            **kwargs: Kwargs to pass to `SpeechLabel` constructor.
-        """
-        audio_files, durations, labels, offsets, wers, = (
-            [],
-            [],
-            [],
-            [],
-            [],
-        )
-
-        for item in manifest.item_iter(manifests_files, parse_func=self.__parse_item):
-            audio_files.append(item["audio_file"])
-            durations.append(item["duration"])
-            wers.append(item["wers"])
-            labels.append(item["label"])
-            offsets.append(item["offset"])
-
-        super().__init__(audio_files, durations, labels, offsets, wers, *args, **kwargs)
-
-    def __parse_item(self, line: str, manifest_file: str) -> Dict[str, Any]:
-        item = json.loads(line)
-
-        # Audio file
-        if "audio_filename" in item:
-            item["audio_file"] = item.pop("audio_filename")
-        elif "audio_filepath" in item:
-            item["audio_file"] = item.pop("audio_filepath")
-        else:
-            raise ValueError(
-                f"Manifest file has invalid json line "
-                f"structure: {line} without proper audio file key."
-            )
-        item["audio_file"] = os.path.expanduser(item["audio_file"])
-
-        # Duration.
-        if "duration" not in item:
-            raise ValueError(
-                f"Manifest file has invalid json line "
-                f"structure: {line} without proper duration key."
-            )
-
-        # Label.
-        if "command" in item:
-            item["label"] = item.pop("command")
-        elif "target" in item:
-            item["label"] = item.pop("target")
-        elif "label" in item:
-            pass
-        else:
-            raise ValueError(
-                f"Manifest file has invalid json line "
-                f"structure: {line} without proper label key."
-            )
-
-        item = dict(
-            audio_file=item["audio_file"],
-            duration=item["duration"],
-            label=item["label"],
-            offset=item.get("offset", None),
-            wers=ast.literal_eval(item["wers"]),
-        )
-
-        return item
 
 
 class ASRSpeechLabel(SpeechLabel):
@@ -561,12 +483,81 @@ class ASRSpeechLabel(SpeechLabel):
         return item
 
 
+class CustomASRSpeechLabel(CustomSpeechLabel):
+    """`SpeechLabel` collector from structured json files."""
+
+    def __init__(self, manifests_files: Union[str, List[str]], *args, **kwargs):
+        """Parse lists of audio files, durations and transcripts texts.
+
+        Args:
+            manifests_files: Either single string file or list of such -
+                manifests to yield items from.
+            is_regression_task: It's a regression task
+            *args: Args to pass to `SpeechLabel` constructor.
+            **kwargs: Kwargs to pass to `SpeechLabel` constructor.
+        """
+        audio_files, durations, labels, offsets, wers, = [], [], [], [], []
+
+        for item in manifest.item_iter(manifests_files, parse_func=self.__parse_item):
+            audio_files.append(item["audio_file"])
+            durations.append(item["duration"])
+            wers.append(item["wers"])
+            labels.append(item["label"])
+            offsets.append(item["offset"])
+        self.labels = labels
+        super().__init__(audio_files, durations, labels, offsets, wers, *args, **kwargs)
+
+    def __parse_item(self, line: str, manifest_file: str) -> Dict[str, Any]:
+        item = json.loads(line)
+
+        # Audio file
+        if "audio_filename" in item:
+            item["audio_file"] = item.pop("audio_filename")
+        elif "audio_filepath" in item:
+            item["audio_file"] = item.pop("audio_filepath")
+        else:
+            raise ValueError(
+                f"Manifest file has invalid json line "
+                f"structure: {line} without proper audio file key."
+            )
+        item["audio_file"] = os.path.expanduser(item["audio_file"])
+
+        # Duration.
+        if "duration" not in item:
+            raise ValueError(
+                f"Manifest file has invalid json line "
+                f"structure: {line} without proper duration key."
+            )
+
+        # Label.
+        if "command" in item:
+            item["label"] = item.pop("command")
+        elif "target" in item:
+            item["label"] = item.pop("target")
+        elif "label" in item:
+            pass
+        else:
+            raise ValueError(
+                f"Manifest file has invalid json line "
+                f"structure: {line} without proper label key."
+            )
+
+        item = dict(
+            audio_file=item["audio_file"],
+            duration=item["duration"],
+            label=item["label"],
+            offset=item.get("offset", None),
+            wers=ast.literal_eval(item["wers"]),
+        )
+
+        return item
+
+
 class FeatureSequenceLabel(_Collection):
     """List of feature sequence of label correspondence with preprocessing."""
 
     OUTPUT_TYPE = collections.namedtuple(
-        typename="FeatureSequenceLabelEntity",
-        field_names="feature_file seq_label",
+        typename="FeatureSequenceLabelEntity", field_names="feature_file seq_label",
     )
 
     def __init__(
@@ -622,7 +613,7 @@ class FeatureSequenceLabel(_Collection):
         super().__init__(data)
 
     def relative_speaker_parser(self, seq_label):
-        """Convert sequence of speaker labels to relative labels.
+        """ Convert sequence of speaker labels to relative labels.
         Convert sequence of absolute speaker to sequence of relative speaker [E A C A E E C] -> [0 1 2 1 0 0 2]
         In this seq of label , if label do not appear before, assign new relative labels len(pos); else reuse previous assigned relative labels.
         Args:
@@ -699,9 +690,6 @@ class ASRFeatureSequenceLabel(FeatureSequenceLabel):
                 f"structure: {line} without proper seq_label key."
             )
 
-        item = dict(
-            feature_file=item["feature_file"],
-            seq_label=item["seq_label"],
-        )
+        item = dict(feature_file=item["feature_file"], seq_label=item["seq_label"],)
 
         return item

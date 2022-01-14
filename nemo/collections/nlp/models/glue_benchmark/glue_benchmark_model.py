@@ -71,10 +71,6 @@ class GLUEModel(NLPModel):
     def output_types(self) -> Optional[Dict[str, NeuralType]]:
         return self.pooler.output_types
 
-    @property
-    def output_module(self):
-        return self.pooler
-
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
         """
         Initializes model to use BERT model for GLUE tasks.
@@ -205,6 +201,7 @@ class GLUEModel(NLPModel):
             all_preds.append(preds)
             all_labels.append(labels)
 
+        tensorboard_logs = {}
         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
             preds = []
             labels = []
@@ -213,9 +210,9 @@ class GLUEModel(NLPModel):
             for l in all_labels:
                 labels.extend(tensor2list(l))
 
-            results = compute_metrics(self.task_name, np.array(preds), np.array(labels))
+            tensorboard_logs = compute_metrics(self.task_name, np.array(preds), np.array(labels))
             val_name = self._validation_names[dataloader_idx].upper()
-            logging.info(f'{val_name} evaluation: {results}')
+            logging.info(f'{val_name} evaluation: {tensorboard_logs}')
 
             # writing labels and predictions to a file in output_dir is specified in the config
             output_dir = self._cfg.output_dir
@@ -227,10 +224,11 @@ class GLUEModel(NLPModel):
                     f.write('labels\t' + list2str(labels) + '\n')
                     f.write('preds\t' + list2str(preds) + '\n')
 
-        self.log('val_loss', avg_loss)
-        if self.trainer.is_global_zero:
-            for k, v in results.items():
-                self.log(f'{val_name}_{k}', v, rank_zero_only=True)
+        tensorboard_logs['val_loss'] = avg_loss
+        for key in tensorboard_logs:
+            self.log(f'{key}', tensorboard_logs[key], prog_bar=True)
+
+        return {'val_loss': avg_loss, 'log': tensorboard_logs}
 
     def setup_training_data(self, train_data_config: Optional[DictConfig] = None):
         if train_data_config is None:

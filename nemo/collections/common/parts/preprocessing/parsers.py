@@ -11,12 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-'''
-A collection of simple character based parsers. These parser handle cleaning and tokenization by default.
-We currently support English.
-'''
-
 import string
 from typing import List, Optional
 
@@ -42,7 +36,6 @@ class CharParser:
         blank_id: int = -1,
         do_normalize: bool = True,
         do_lowercase: bool = True,
-        do_tokenize: bool = True,
     ):
         """Creates simple mapping char parser.
 
@@ -63,7 +56,6 @@ class CharParser:
         self._blank_id = blank_id
         self._do_normalize = do_normalize
         self._do_lowercase = do_lowercase
-        self._do_tokenize = do_tokenize
 
         self._labels_map = {label: index for index, label in enumerate(labels)}
         self._special_labels = set([label for label in labels if len(label) > 1])
@@ -74,10 +66,8 @@ class CharParser:
             if text is None:
                 return None
 
-        if not self._do_tokenize:
-            return text
-
         text_tokens = self._tokenize(text)
+
         return text_tokens
 
     def _normalize(self, text: str) -> Optional[str]:
@@ -106,23 +96,6 @@ class CharParser:
         tokens = [token for token in tokens if token != self._blank_id]
 
         return tokens
-
-    def decode(self, str_input):
-        r_map = {}
-        for k, v in self._labels_map.items():
-            r_map[v] = k
-        r_map[len(self._labels_map)] = "<BOS>"
-        r_map[len(self._labels_map) + 1] = "<EOS>"
-        r_map[len(self._labels_map) + 2] = "<P>"
-
-        out = []
-        for i in str_input:
-            # Skip OOV
-            if i not in r_map:
-                continue
-            out.append(r_map[i.item()])
-
-        return "".join(out)
 
 
 class ENCharParser(CharParser):

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 from omegaconf.omegaconf import MISSING
@@ -25,7 +25,6 @@ from nemo.collections.nlp.modules.common.transformer.transformer_encoders import
 from nemo.collections.nlp.modules.common.transformer.transformer_modules import TransformerEmbedding
 from nemo.core.classes.common import typecheck
 from nemo.core.classes.exportable import Exportable
-from nemo.core.neural_types import ChannelType, NeuralType
 
 # @dataclass
 # class TransformerConfig:
@@ -66,11 +65,6 @@ class NeMoTransformerConfig:
 @dataclass
 class NeMoTransformerEncoderConfig(NeMoTransformerConfig):
     mask_future: bool = False
-
-
-@dataclass
-class NeMoTransformerDecoderConfig(NeMoTransformerConfig):
-    r2l: bool = False
 
 
 class TransformerEncoderNM(EncoderModule, Exportable):
@@ -184,10 +178,6 @@ class TransformerDecoderNM(DecoderModule, Exportable):
         self._vocab_size = vocab_size
         self._hidden_size = hidden_size
         self._max_sequence_length = max_sequence_length
-        self.num_states = num_layers + 1
-        self.return_mems = False
-        if pre_ln_final_layer_norm:
-            self.num_states += 1
 
         self._embedding = TransformerEmbedding(
             vocab_size=self.vocab_size,
@@ -212,27 +202,14 @@ class TransformerDecoderNM(DecoderModule, Exportable):
         )
 
     @typecheck()
-    def forward(
-        self, input_ids, decoder_mask, encoder_embeddings, encoder_mask, decoder_mems=None,
-    ):
-        start_pos = 0
-        if decoder_mems is not None:
-            start_pos = input_ids.shape[1] - 1
-            input_ids = input_ids[:, -1:]
-            decoder_mask = decoder_mask[:, -1:]
-            decoder_mems = torch.transpose(decoder_mems, 0, 1)
-        decoder_embeddings = self._embedding(input_ids=input_ids, start_pos=start_pos)
+    def forward(self, input_ids, decoder_mask, encoder_embeddings, encoder_mask):
+        decoder_embeddings = self._embedding(input_ids=input_ids)
         decoder_hidden_states = self._decoder(
             decoder_states=decoder_embeddings,
             decoder_mask=decoder_mask,
             encoder_states=encoder_embeddings,
             encoder_mask=encoder_mask,
-            decoder_mems_list=decoder_mems,
-            return_mems=self.return_mems,
-            return_mems_as_list=False,
         )
-        if self.return_mems:
-            decoder_hidden_states = torch.transpose(decoder_hidden_states, 0, 1)
         return decoder_hidden_states
 
     @property
@@ -264,18 +241,8 @@ class TransformerDecoderNM(DecoderModule, Exportable):
         sample = next(self.parameters())
         input_ids = torch.randint(low=0, high=2048, size=(2, 16), device=sample.device)
         encoder_mask = torch.randint(low=0, high=1, size=(2, 16), device=sample.device)
-        mem_size = [2, self.num_states, 15, self._hidden_size]
-        decoder_mems = torch.rand(mem_size, device=sample.device)
-        return tuple([input_ids, encoder_mask, self._embedding(input_ids), encoder_mask, decoder_mems])
+        return tuple([input_ids, encoder_mask, self._embedding(input_ids), encoder_mask])
 
     def _prepare_for_export(self, **kwargs):
         self._decoder.diagonal = None
-        self.return_mems = True
         super()._prepare_for_export(**kwargs)
-
-    @property
-    def output_types(self) -> Optional[Dict[str, NeuralType]]:
-        if self.return_mems:
-            return {"last_hidden_states": NeuralType(('B', 'D', 'T', 'D'), ChannelType())}
-        else:
-            return {"last_hidden_states": NeuralType(('B', 'T', 'D'), ChannelType())}

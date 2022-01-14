@@ -12,8 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import List
 import torch
+import pdb
+import numpy as np
 from torch import Tensor, nn
+import torch.nn.functional as f
 
 from nemo.core.classes import Serialization, Typing, typecheck
 from nemo.core.neural_types import (
@@ -23,8 +27,8 @@ from nemo.core.neural_types import (
     LossType,
     MaskType,
     NeuralType,
-    RegressionValuesType,
 )
+from sklearn.utils.class_weight import compute_class_weight, compute_sample_weight
 
 
 __all__ = ["CrossEntropyLoss", "NLLLoss", "CustomLoss"]
@@ -37,7 +41,8 @@ class CrossEntropyLoss(nn.CrossEntropyLoss, Serialization, Typing):
 
     @property
     def input_types(self):
-        """Returns definitions of module input ports."""
+        """Returns definitions of module input ports.
+        """
         return {
             "logits": NeuralType(
                 ["B"] + ["ANY"] * (self._logits_dim - 1), LogitsType()
@@ -52,7 +57,8 @@ class CrossEntropyLoss(nn.CrossEntropyLoss, Serialization, Typing):
 
     @property
     def output_types(self):
-        """Returns definitions of module output ports."""
+        """Returns definitions of module output ports.
+        """
         return {"loss": NeuralType(elements_type=LossType())}
 
     def __init__(self, logits_ndim=2, weight=None, reduction="mean", ignore_index=-100):
@@ -92,14 +98,15 @@ class CrossEntropyLoss(nn.CrossEntropyLoss, Serialization, Typing):
         return loss
 
 
-class CustomLoss(nn.SmoothL1Loss, Serialization, Typing):
+class CustomLoss(nn.MSELoss, Serialization, Typing):
     """
     CustomLoss
     """
 
     @property
     def input_types(self):
-        """Returns definitions of module input ports."""
+        """Returns definitions of module input ports.
+        """
         return {
             "preds": NeuralType(tuple("B"), RegressionValuesType()),
             "labels": NeuralType(tuple("B"), LabelsType()),
@@ -107,7 +114,8 @@ class CustomLoss(nn.SmoothL1Loss, Serialization, Typing):
 
     @property
     def output_types(self):
-        """Returns definitions of module output ports."""
+        """Returns definitions of module output ports.
+        """
         return {"loss": NeuralType(elements_type=LossType())}
 
     def __init__(self, reduction: str = "mean"):
@@ -124,7 +132,7 @@ class CustomLoss(nn.SmoothL1Loss, Serialization, Typing):
             logits: output of the classifier
             labels: ground truth labels (argmin(wers))
             wers: word error rate list for the sample
-        #"""
+        # """
         # class_weight = {0:0.10488736, # 'aws'
         #                 1:0.06675666, # 'azure'
         #                 2:0.82835599  # 'google'
@@ -132,25 +140,7 @@ class CustomLoss(nn.SmoothL1Loss, Serialization, Typing):
 
         # sample_weight = compute_sample_weight("balanced", torch.argmax(wers, dim=1).tolist())
         # sample_weight = torch.Tensor(sample_weight).to(logits.device)
-
-        wer_normalized = nn.functional.f.normalize(wers, p=1, dim=1)
-
-        SUPPLIER2COST = {
-            "aws": 0.024,
-            "azure": 0.017,
-            "google": 0.024,
-            "apptek": 0.0263,
-        }
-        COSTS = [
-            0.024,
-            0.017,
-            0.024,
-        ]
-
-        return super().forward(
-            torch.multiply(logits, wer_normalized).sum(dim=1),
-            torch.zeros((logits.shape[0])).to(logits.device),
-        )
+        return super().forward(logits, wers)
 
 
 class NLLLoss(nn.NLLLoss, Serialization, Typing):
@@ -160,7 +150,8 @@ class NLLLoss(nn.NLLLoss, Serialization, Typing):
 
     @property
     def input_types(self):
-        """Returns definitions of module input ports."""
+        """Returns definitions of module input ports.
+        """
         return {
             "log_probs": NeuralType(("B", "T", "D"), LogprobsType()),
             "labels": NeuralType(("B", "T"), LabelsType()),
@@ -169,7 +160,8 @@ class NLLLoss(nn.NLLLoss, Serialization, Typing):
 
     @property
     def output_types(self):
-        """Returns definitions of module output ports."""
+        """Returns definitions of module output ports.
+        """
         return {"loss": NeuralType(elements_type=LossType())}
 
     def __init__(

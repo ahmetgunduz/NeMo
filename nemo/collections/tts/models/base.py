@@ -17,6 +17,7 @@ from contextlib import ExitStack, contextmanager
 import torch
 from torch_stft import STFT
 
+from nemo.collections.common.parts.patch_utils import istft_patch, stft_patch
 from nemo.collections.tts.helpers.helpers import OperationMode
 from nemo.collections.tts.models import *  # Avoid circular imports
 from nemo.core.classes import ModelPT
@@ -35,8 +36,6 @@ class SpectrogramGenerator(ModelPT, ABC):
         A helper function that accepts raw python strings and turns them into a tensor. The tensor should have 2
         dimensions. The first is the batch, which should be of size 1. The second should represent time. The tensor
         should represent either tokenized or embedded text, depending on the model.
-
-        Note that some models have `normalize` parameter in this function which will apply normalizer if it is available.
         """
 
     @abstractmethod
@@ -152,7 +151,7 @@ class GlowVocoder(Vocoder):
                     ) from e
 
                 def yet_another_patch(audio, n_fft, hop_length, win_length, window):
-                    spec = torch.stft(audio, n_fft=n_fft, hop_length=hop_length, win_length=win_length, window=window)
+                    spec = stft_patch(audio, n_fft=n_fft, hop_length=hop_length, win_length=win_length, window=window)
                     if spec.dtype in [torch.cfloat, torch.cdouble]:
                         spec = torch.view_as_real(spec)
                     return torch.sqrt(spec.pow(2).sum(-1)), torch.atan2(spec[..., -1], spec[..., 0])
@@ -160,7 +159,7 @@ class GlowVocoder(Vocoder):
                 self.stft = lambda x: yet_another_patch(
                     x, n_fft=n_fft, hop_length=hop_length, win_length=win_length, window=window,
                 )
-                self.istft = lambda x, y: torch.istft(
+                self.istft = lambda x, y: istft_patch(
                     torch.complex(x * torch.cos(y), x * torch.sin(y)),
                     n_fft=n_fft,
                     hop_length=hop_length,

@@ -15,9 +15,25 @@
 from typing import List
 
 import torch
-from torchmetrics import Metric
+from torchmetrics import Metric, MeanSquaredError
 
-__all__ = ['TopKClassificationAccuracy']
+__all__ = ["TopKClassificationAccuracy", "MyMeanSquaredError"]
+
+
+class MyMeanSquaredError(MeanSquaredError):
+    def __init__(
+        self,
+        compute_on_step=True,
+        dist_sync_on_step=False,
+        process_group=None,
+        dist_sync_fn=None,
+    ):
+        super().__init__(
+            compute_on_step=compute_on_step,
+            dist_sync_on_step=dist_sync_on_step,
+            process_group=process_group,
+            dist_sync_fn=dist_sync_fn,
+        )
 
 
 class TopKClassificationAccuracy(Metric):
@@ -66,9 +82,17 @@ class TopKClassificationAccuracy(Metric):
 
         self.top_k = top_k
         self.add_state(
-            "correct_counts_k", default=torch.zeros(len(self.top_k)), dist_reduce_fx='sum', persistent=False
+            "correct_counts_k",
+            default=torch.zeros(len(self.top_k)),
+            dist_reduce_fx="sum",
+            persistent=False,
         )
-        self.add_state("total_counts_k", default=torch.zeros(len(self.top_k)), dist_reduce_fx='sum', persistent=False)
+        self.add_state(
+            "total_counts_k",
+            default=torch.zeros(len(self.top_k)),
+            dist_reduce_fx="sum",
+            persistent=False,
+        )
 
     @torch.no_grad()
     def top_k_predicted_labels(self, logits: torch.Tensor) -> torch.Tensor:
@@ -92,8 +116,12 @@ class TopKClassificationAccuracy(Metric):
                 correct_counts_k.append(correct_k)
                 total_counts_k.append(total_k)
 
-            self.correct_counts_k = torch.tensor(correct_counts_k, dtype=labels.dtype, device=labels.device)
-            self.total_counts_k = torch.tensor(total_counts_k, dtype=labels.dtype, device=labels.device)
+            self.correct_counts_k = torch.tensor(
+                correct_counts_k, dtype=labels.dtype, device=labels.device
+            )
+            self.total_counts_k = torch.tensor(
+                total_counts_k, dtype=labels.dtype, device=labels.device
+            )
 
     def compute(self):
         """
@@ -103,14 +131,20 @@ class TopKClassificationAccuracy(Metric):
             A list of length `K`, such that k-th index corresponds to top-k accuracy
             over all distributed processes.
         """
-        if not len(self.correct_counts_k) == len(self.top_k) == len(self.total_counts_k):
+        if (
+            not len(self.correct_counts_k)
+            == len(self.top_k)
+            == len(self.total_counts_k)
+        ):
             raise ValueError("length of counts must match to topk length")
 
         if self.top_k == [1]:
             return [self.correct_counts_k.float() / self.total_counts_k]
 
         else:
-            top_k_scores = compute_topk_accuracy(self.correct_counts_k, self.total_counts_k)
+            top_k_scores = compute_topk_accuracy(
+                self.correct_counts_k, self.total_counts_k
+            )
 
             return top_k_scores
 

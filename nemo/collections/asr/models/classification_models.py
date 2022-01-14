@@ -287,17 +287,12 @@ class _EncDecBaseModel(ASRModel, ExportableEncDecModel):
         # Model's mode and device
         mode = self.training
         device = next(self.parameters()).device
-
-        if hasattr(self.preprocessor.featurizer, 'dither'):
-            dither_value = self.preprocessor.featurizer.dither
-        if hasattr(self.preprocessor.featurizer, 'pad_to'):
-            pad_to_value = self.preprocessor.featurizer.pad_to
+        dither_value = self.preprocessor.featurizer.dither
+        pad_to_value = self.preprocessor.featurizer.pad_to
 
         try:
-            if hasattr(self.preprocessor.featurizer, 'dither'):
-                self.preprocessor.featurizer.dither = 0.0
-            if hasattr(self.preprocessor.featurizer, 'pad_to'):
-                self.preprocessor.featurizer.pad_to = 0
+            self.preprocessor.featurizer.dither = 0.0
+            self.preprocessor.featurizer.pad_to = 0
             # Switch model to evaluation mode
             self.eval()
             logging_level = logging.get_verbosity()
@@ -342,11 +337,8 @@ class _EncDecBaseModel(ASRModel, ExportableEncDecModel):
         finally:
             # set mode back to its original value
             self.train(mode=mode)
-
-            if hasattr(self.preprocessor.featurizer, 'dither'):
-                self.preprocessor.featurizer.dither = dither_value
-            if hasattr(self.preprocessor.featurizer, 'pad_to'):
-                self.preprocessor.featurizer.pad_to = pad_to_value
+            self.preprocessor.featurizer.dither = dither_value
+            self.preprocessor.featurizer.pad_to = pad_to_value
             logging.set_verbosity(logging_level)
         return labels
 

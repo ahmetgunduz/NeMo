@@ -20,30 +20,12 @@ from nemo.collections.asr.modules.audio_preprocessing import (
 )
 from nemo.collections.asr.modules.beam_search_decoder import BeamSearchDecoderWithLM
 from nemo.collections.asr.modules.conformer_encoder import ConformerEncoder
+from nemo.collections.asr.modules.conv_asr import (
+    ConvASRDecoder,
+    ConvASRDecoderClassification,
+    ConvASREncoder,
+    SpeakerDecoder,
+    SpeakerDecoderRegression,
+)
 from nemo.collections.asr.modules.lstm_decoder import LSTMDecoder
 from nemo.collections.asr.modules.rnnt import RNNTDecoder, RNNTJoint
-
-# TODO @blisc: Perhaps refactor instead of import guarding
-try:
-    from nemo.collections.asr.modules.conv_asr import (
-        ConvASRDecoder,
-        ConvASRDecoderClassification,
-        ConvASRDecoderReconstruction,
-        ConvASREncoder,
-        ECAPAEncoder,
-        ParallelConvASREncoder,
-        SpeakerDecoder,
-        CustomSpeakerDecoder,
-    )
-except ModuleNotFoundError:
-    from nemo.utils.exceptions import CheckInstall
-
-    # fmt: off
-    class ConvASRDecoder(CheckInstall): pass
-    class ConvASRDecoderClassification(CheckInstall): pass
-    class ConvASREncoder(CheckInstall): pass
-    class ECAPAEncoder(CheckInstall): pass
-    class ParallelConvASREncoder(CheckInstall): pass
-    class SpeakerDecoder(CheckInstall): pass
-    class ConvASRDecoderReconstruction(CheckInstall): pass
-    # fmt: on

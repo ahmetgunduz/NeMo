@@ -29,14 +29,13 @@ class GlobalAverageLossMetric(Metric):
 
     Args:
         compute_on_step:
-            The method :meth:`forward` only calls ``update()`` and returns ``None`` if this is set to ``False``.
-            default: ``True``
+            Forward only calls ``update()`` and returns ``None`` if this is set to ``False``. default: ``True``
         dist_sync_on_step:
-            Synchronize metric state across processes at each method :meth:`forward` call before returning the
-            value at the step
+            Synchronize metric state across processes at each ``forward()``
+            before returning the value at the step.
         process_group:
             Specify the process group on which synchronization is called. default: ``None`` (which selects the entire
-            world)
+                world)
         take_avg_loss:
             If ``True`` values of :meth:`update` method ``loss`` argument has to be a mean loss. If ``False``
             values of :meth:`update` method ``loss`` argument has to be a sum of losses. default: ``True``
@@ -61,9 +60,8 @@ class GlobalAverageLossMetric(Metric):
                 The sum or mean of the results of these measurements are in the ``loss`` parameter.
         """
         if self.take_avg_loss:
-            self.loss_sum += loss.detach() * num_measurements
-        else:
-            self.loss_sum += loss.detach()
+            loss *= num_measurements
+        self.loss_sum += loss
         self.num_measurements += num_measurements
 
     def compute(self):

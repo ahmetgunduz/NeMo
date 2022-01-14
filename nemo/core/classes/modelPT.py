@@ -13,12 +13,16 @@
 # limitations under the License.
 
 import copy
+import hashlib
 import inspect
 import os
+import shutil
+import tarfile
+import tempfile
 import uuid
 from abc import abstractmethod
 from os import path
-from pathlib import Path
+from os.path import expanduser
 from typing import Callable, Dict, List, Optional, Union
 
 import hydra
@@ -27,15 +31,40 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.utilities import rank_zero_only
 
+import nemo
 from nemo.core import optim
 from nemo.core.classes.common import Model
-from nemo.core.connectors.save_restore_connector import SaveRestoreConnector
 from nemo.core.optim import prepare_lr_scheduler
 from nemo.utils import logging, model_utils
 from nemo.utils.app_state import AppState
 from nemo.utils.get_rank import is_global_rank_zero
 
-__all__ = ['ModelPT']
+# Need to set them before EFF import as it is using them.
+_MODEL_CONFIG_YAML = "model_config.yaml"
+_MODEL_WEIGHTS = "model_weights.ckpt"
+
+__all__ = ["ModelPT"]
+
+"""
+Internal global flags that determine core functionality of ModelPT.
+
+_MODEL_IS_RESTORED:
+    This flag determines the context of the model - whether the model is currently being
+    restored or not.
+    -   When set, it can be assumed that the model's will disable all automatic methods -
+        setup_training_data(), setup_validation/test_data() and their multi equivalents.
+    -   If a model is being restored from a archive file (tarfile), it can be assumed that
+        under this context, the cwd is *inside* the tarfile itself.
+
+_MODEL_RESTORE_PATH:
+    A string path to a a file from which the model is being restored.
+    This file can either be a PyTorch Lightning Checkpoint, or a archive (tarfile) that contains
+    artifact objects.
+    If it is an archive file, during restoration, the cwd will be temporarily moved to inside the
+    archive itself.
+"""
+_MODEL_IS_RESTORED = False
+_NEMO_FILE_FOLDER = None
 
 
 class ModelPT(LightningModule, Model):
@@ -64,42 +93,23 @@ class ModelPT(LightningModule, Model):
             )
         super().__init__()
 
-        """
-        Internal global flags that determine core functionality of ModelPT.
-
-        _MODEL_IS_RESTORED:
-            This flag determines the context of the model - whether the model is currently being
-            restored or not.
-            -   When set, it can be assumed that the model's will disable all automatic methods -
-                setup_training_data(), setup_validation/test_data() and their multi equivalents.
-            -   If a model is being restored from a archive file (tarfile), it can be assumed that
-                under this context, the cwd is *inside* the tarfile itself.
-
-        _MODEL_RESTORE_PATH:
-            A string path to a a file from which the model is being restored.
-            This file can either be a PyTorch Lightning Checkpoint, or a archive (tarfile) that contains
-            artifact objects.
-            If it is an archive file, during restoration, the cwd will be temporarily moved to inside the
-            archive itself.
-        """
-        # set global vars in AppState
-        app_state = AppState()
-
         # Convert config to a DictConfig
         cfg = model_utils.convert_model_config_to_dict_config(cfg)
 
         # Convert config to support Hydra 1.0+ instantiation
         cfg = model_utils.maybe_update_config_version(cfg)
 
-        if 'target' not in cfg:
+        if "target" not in cfg:
             # This is for Jarvis service.
             OmegaConf.set_struct(cfg, False)
-            cfg.target = "{0}.{1}".format(self.__class__.__module__, self.__class__.__name__)
+            cfg.target = "{0}.{1}".format(
+                self.__class__.__module__, self.__class__.__name__
+            )
             OmegaConf.set_struct(cfg, True)
 
         self._cfg = cfg
 
-        self.save_hyperparameters("cfg")
+        self.save_hyperparameters(self._cfg)
         self._train_dl = None
         self._validation_dl = None
         self._test_dl = None
@@ -107,39 +117,40 @@ class ModelPT(LightningModule, Model):
         self._scheduler = None
         self.trainer = trainer  # reference required for self.*_rank
         self._trainer = self.trainer  # alias for backward compatibility
-        self._save_restore_connector = SaveRestoreConnector()
 
         self._set_model_guid()
 
         # Set device_id in AppState
         if torch.cuda.is_available() and torch.cuda.current_device() is not None:
+            app_state = AppState()
             app_state.device_id = torch.cuda.current_device()
 
         if self._cfg is not None and not self._is_model_being_restored():
-            if 'train_ds' in self._cfg and self._cfg.train_ds is not None:
+            if "train_ds" in self._cfg and self._cfg.train_ds is not None:
                 self.setup_training_data(self._cfg.train_ds)
 
-            if 'validation_ds' in self._cfg and self._cfg.validation_ds is not None:
+            if "validation_ds" in self._cfg and self._cfg.validation_ds is not None:
                 self.setup_multiple_validation_data(val_data_config=None)
 
-            if 'test_ds' in self._cfg and self._cfg.test_ds is not None:
+            if "test_ds" in self._cfg and self._cfg.test_ds is not None:
                 self.setup_multiple_test_data(test_data_config=None)
 
         else:
-            if 'train_ds' in self._cfg and self._cfg.train_ds is not None:
+            if "train_ds" in self._cfg and self._cfg.train_ds is not None:
                 logging.warning(
                     f"If you intend to do training or fine-tuning, please call the ModelPT.setup_training_data() method "
                     f"and provide a valid configuration file to setup the train data loader.\n"
                     f"Train config : \n{OmegaConf.to_yaml(self._cfg.train_ds)}"
                 )
 
-            if 'validation_ds' in self._cfg and self._cfg.validation_ds is not None:
+            if "validation_ds" in self._cfg and self._cfg.validation_ds is not None:
                 logging.warning(
                     f"If you intend to do validation, please call the ModelPT.setup_validation_data() or ModelPT.setup_multiple_validation_data() method "
                     f"and provide a valid configuration file to setup the validation data loader(s). \n"
                     f"Validation config : \n{OmegaConf.to_yaml(self._cfg.validation_ds)}"
                 )
-            if 'test_ds' in self._cfg and self._cfg.test_ds is not None:
+
+            if "test_ds" in self._cfg and self._cfg.test_ds is not None:
                 logging.warning(
                     f"Please call the ModelPT.setup_test_data() or ModelPT.setup_multiple_test_data() method "
                     f"and provide a valid configuration file to setup the test data loader(s).\n"
@@ -149,14 +160,11 @@ class ModelPT(LightningModule, Model):
         # ModelPT wrappers over subclass implementations
         self.training_step = model_utils.wrap_training_step(self.training_step)
 
-    def __init_subclass__(cls) -> None:
-        cls._save_restore_connector = SaveRestoreConnector()
-
     def register_artifact(
-        self, config_path: str, src: str, verify_src_exists: bool = True,
+        self, config_path: str, src: str, verify_src_exists: bool = True
     ):
         """ Register model artifacts with this function. These artifacts (files) will be included inside .nemo file
-            when model.save_to("mymodel.nemo") is called.
+            when model.save_to("mymodel.nemo") is called.        
 
             How it works:
             1. It always returns existing absolute path which can be used during Model constructor call
@@ -174,9 +182,8 @@ class ModelPT(LightningModule, Model):
             Args:
                 config_path (str): Artifact key. Usually corresponds to the model config.
                 src (str): Path to artifact.
-                verify_src_exists (bool): If set to False, then the artifact is optional and register_artifact will return None even if
+                verify_src_exists (bool): If set to False, then the artifact is optional and register_artifact will return None even if 
                                           src is not found. Defaults to True.
-                save_restore_connector (SaveRestoreConnector): Can be overrided to add custom save and restore logic.
 
             Returns:
                 str: If src is not None or empty it always returns absolute path which is guaranteed to exists during model instnce life
@@ -187,7 +194,7 @@ class ModelPT(LightningModule, Model):
         if src is None or src == "":
             return src
 
-        if not hasattr(self, 'artifacts'):
+        if not hasattr(self, "artifacts"):
             self.artifacts = {}
 
         if self.artifacts is None:
@@ -199,8 +206,157 @@ class ModelPT(LightningModule, Model):
                 f"it has already been registered."
             )
 
-        return self._save_restore_connector.register_artifact(self, config_path, src, verify_src_exists)
+        artifact_item = model_utils.ArtifactItem()
 
+        # This is for backward compatibility, if the src objects exists simply inside of the tarfile
+        # without its key having been overriden, this pathway will be used.
+        src_obj_name = os.path.basename(src)
+        if _NEMO_FILE_FOLDER is not None:
+            src_obj_path = os.path.abspath(
+                os.path.join(_NEMO_FILE_FOLDER, src_obj_name)
+            )
+        else:
+            src_obj_path = src_obj_name
+
+        # src is a local existing path - register artifact and return exact same path for usage by the model
+        if os.path.exists(os.path.abspath(src)):
+            return_path = os.path.abspath(src)
+            artifact_item.path_type = model_utils.ArtifactPathType.LOCAL_PATH
+
+        # this is the case when artifact must be retried from the nemo file
+        # we are assuming that the location of the right nemo file is available from _MODEL_RESTORE_PATH
+        elif src.startswith("nemo:"):
+            return_path = os.path.abspath(os.path.join(_NEMO_FILE_FOLDER, src[5:]))
+            artifact_item.path_type = model_utils.ArtifactPathType.TAR_PATH
+
+        # backward compatibility implementation
+        elif os.path.exists(src_obj_path):
+            return_path = src_obj_path
+            artifact_item.path_type = model_utils.ArtifactPathType.TAR_PATH
+        else:
+            if verify_src_exists:
+                raise FileNotFoundError(
+                    f"src path does not exist or it is not a path in nemo file. src value I got was: {src}. Absolute: {os.path.abspath(src)}"
+                )
+            else:
+                # artifact is optional and we simply return None
+                return None
+
+        assert os.path.exists(return_path)
+
+        artifact_item.path = os.path.abspath(src)
+        self.artifacts[config_path] = artifact_item
+        # we were called by ModelPT
+        if hasattr(self, "cfg"):
+            with open_dict(self._cfg):
+                OmegaConf.update(self.cfg, config_path, return_path)
+        return return_path
+
+    def _handle_artifacts(self, nemo_file_folder):
+        tarfile_artifacts = []
+        app_state = AppState()
+        for conf_path, artiitem in self.artifacts.items():
+            if artiitem.path_type == model_utils.ArtifactPathType.LOCAL_PATH:
+                if not os.path.exists(artiitem.path):
+                    raise FileNotFoundError(
+                        f"Artifact {conf_path} not found at location: {artiitem.path}"
+                    )
+
+                # Generate new uniq artifact name and copy it to nemo_file_folder
+                # Note uuid.uuid4().hex is guaranteed to be 32 character long
+                artifact_base_name = os.path.basename(artiitem.path)
+                artifact_uniq_name = f"{uuid.uuid4().hex}_{artifact_base_name}"
+                shutil.copy2(
+                    artiitem.path, os.path.join(nemo_file_folder, artifact_uniq_name)
+                )
+
+                # Update artifacts registry
+                artiitem.hashed_path = "nemo:" + artifact_uniq_name
+                self.artifacts[conf_path] = artiitem
+
+            elif artiitem.path_type == model_utils.ArtifactPathType.TAR_PATH:
+                # process all tarfile artifacts in one go, so preserve key-value pair
+                tarfile_artifacts.append((conf_path, artiitem))
+
+            else:
+                raise ValueError(
+                    f"Directly referencing artifacts from other nemo files isn't supported yet"
+                )
+
+        # Process current tarfile artifacts by unpacking the previous tarfile and extract the artifacts
+        # that are currently required.
+        model_metadata = app_state.get_model_metadata_from_guid(self.model_guid)
+        if len(tarfile_artifacts) > 0 and model_metadata.restoration_path is not None:
+            # Need to step into nemo archive to extract file
+            # Get path where the command is executed - the artifacts will be "retrieved" there
+            # (original .nemo behavior)
+            cwd = os.getcwd()
+            try:
+                # Step into the nemo archive to try and find the file
+                with tempfile.TemporaryDirectory() as archive_dir:
+                    self._unpack_nemo_file(
+                        path2file=model_metadata.restoration_path,
+                        out_folder=archive_dir,
+                    )
+                    os.chdir(archive_dir)
+                    for conf_path, artiitem in tarfile_artifacts:
+                        # Get basename and copy it to nemo_file_folder
+                        if "nemo:" in artiitem.path:
+                            artifact_base_name = artiitem.path.split("nemo:")[1]
+                        else:
+                            artifact_base_name = os.path.basename(artiitem.path)
+                        # no need to hash here as we are in tarfile_artifacts which are already hashed
+                        artifact_uniq_name = artifact_base_name
+                        shutil.copy2(
+                            artifact_base_name,
+                            os.path.join(nemo_file_folder, artifact_uniq_name),
+                        )
+
+                        # Update artifacts registry
+                        new_artiitem = model_utils.ArtifactItem()
+                        new_artiitem.path = "nemo:" + artifact_uniq_name
+                        new_artiitem.path_type = model_utils.ArtifactPathType.TAR_PATH
+                        self.artifacts[conf_path] = new_artiitem
+            finally:
+                # change back working directory
+                os.chdir(cwd)
+
+    def _update_artifact_paths(self, path2yaml_file):
+        if self.artifacts is not None and len(self.artifacts) > 0:
+            conf = OmegaConf.load(path2yaml_file)
+            for conf_path, item in self.artifacts.items():
+                if item.hashed_path is None:
+                    OmegaConf.update(conf, conf_path, item.path)
+                else:
+                    OmegaConf.update(conf, conf_path, item.hashed_path)
+            with open(path2yaml_file, "w") as fout:
+                OmegaConf.save(config=conf, f=fout, resolve=True)
+
+    def _default_save_to(self, save_path: str):
+        """
+        Saves model instance (weights and configuration) into .nemo file.
+        You can use "restore_from" method to fully restore instance from .nemo file.
+
+        .nemo file is an archive (tar.gz) with the following:
+            model_config.yaml - model configuration in .yaml format. You can deserialize this into cfg argument for model's constructor
+            model_wights.chpt - model checkpoint
+
+        Args:
+            save_path: Path to .nemo file where model instance should be saved
+
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_yaml = path.join(tmpdir, _MODEL_CONFIG_YAML)
+            model_weights = path.join(tmpdir, _MODEL_WEIGHTS)
+            self.to_config_file(path2yaml_file=config_yaml)
+            if hasattr(self, "artifacts") and self.artifacts is not None:
+                self._handle_artifacts(nemo_file_folder=tmpdir)
+                # We should not update self._cfg here - the model can still be in use
+                self._update_artifact_paths(path2yaml_file=config_yaml)
+            torch.save(self.state_dict(), model_weights)
+            self._make_nemo_file_from_folder(filename=save_path, source_dir=tmpdir)
+
+    @rank_zero_only
     def save_to(self, save_path: str):
         """
         Saves model instance (weights and configuration) into .nemo file
@@ -214,27 +370,103 @@ class ModelPT(LightningModule, Model):
             save_path: Path to .nemo file where model instance should be saved
         """
 
-        def maybe_make_save_dir(path: 'pathlib.Path'):
-            if not path.parent.exists():
-                path.parent.mkdir(parents=True)
+        # Add NeMo rank check as well
+        if not is_global_rank_zero():
+            return
+        else:
+            self._default_save_to(save_path)
 
-        save_path = Path(save_path).expanduser().resolve()
-        app_state = AppState()
-        if app_state.model_parallel_size is not None:
-            if app_state.model_parallel_size > 1:
-                if type(self._save_restore_connector) == SaveRestoreConnector:
-                    raise ValueError(
-                        'Default NeMo SaveRestoreConnector will not work in model parallel mode. You should use a '
-                        'connector which supports model parallel mode, such as NLPSaveRestoreConnector in NLP. You '
-                        'can also use a custom one.'
+    @classmethod
+    def _default_restore_from(
+        cls,
+        restore_path: str,
+        override_config_path: Optional[Union[OmegaConf, str]] = None,
+        map_location: Optional[torch.device] = None,
+        strict: bool = True,
+        return_config: bool = False,
+    ):
+        """
+        Restores model instance (weights and configuration) into .nemo file
+        Args:
+            restore_path: path to .nemo file from which model should be instantiated
+            override_config_path: path to a yaml config that will override the internal
+                config file or an OmegaConf / DictConfig object representing the model config.
+            map_location: Optional torch.device() to map the instantiated model to a device.
+                By default (None), it will select a GPU if available, falling back to CPU otherwise.
+            strict: Passed to load_state_dict. By default True
+            return_config: If set to true, will return just the underlying config of the restored
+                model as an OmegaConf DictConfig object without instantiating the model.
+
+            Example:
+                ```
+                model = nemo.collections.asr.models.EncDecCTCModel.restore_from('asr.nemo')
+                assert isinstance(model, nemo.collections.asr.models.EncDecCTCModel)
+                ```
+
+        Returns:
+            An instance of type cls or its underlying config (if return_config is set).
+        """
+        # Get path where the command is executed - the artifacts will be "retrieved" there
+        # (original .nemo behavior)
+        cwd = os.getcwd()
+
+        if map_location is None:
+            if torch.cuda.is_available():
+                map_location = torch.device("cuda")
+            else:
+                map_location = torch.device("cpu")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                cls._set_model_restore_state(is_being_restored=True, folder=tmpdir)
+                cls._unpack_nemo_file(path2file=restore_path, out_folder=tmpdir)
+                os.chdir(tmpdir)
+                if override_config_path is None:
+                    config_yaml = path.join(tmpdir, _MODEL_CONFIG_YAML)
+                else:
+                    # can be str path or OmegaConf / DictConfig object
+                    config_yaml = override_config_path
+                if not isinstance(config_yaml, (OmegaConf, DictConfig)):
+                    conf = OmegaConf.load(config_yaml)
+                else:
+                    conf = config_yaml
+                if override_config_path is not None:
+                    # Resolve the override config
+                    conf = OmegaConf.to_container(conf, resolve=True)
+                    conf = OmegaConf.create(conf)
+                    # If override is top level config, extract just `model` from it
+                    if "model" in conf:
+                        conf = conf.model
+
+                if return_config:
+                    instance = conf
+                else:
+                    app_state = AppState()
+                    if app_state.model_parallel_rank is not None:
+                        model_weights = path.join(
+                            tmpdir,
+                            f"mp_rank_{app_state.model_parallel_rank:02}",
+                            _MODEL_WEIGHTS,
+                        )
+                    else:
+                        model_weights = path.join(tmpdir, _MODEL_WEIGHTS)
+                    OmegaConf.set_struct(conf, True)
+                    os.chdir(cwd)
+                    instance = cls.from_config_dict(config=conf)
+                    instance = instance.to(map_location)
+                    instance.load_state_dict(
+                        torch.load(model_weights, map_location=map_location),
+                        strict=strict,
                     )
-            if app_state.data_parallel_rank == 0:
-                maybe_make_save_dir(save_path)
-            # connector checks for ranks properly, no need to check here
-            self._save_restore_connector.save_to(self, str(save_path))  # downstream tasks expect str, not Path
-        elif is_global_rank_zero():
-            maybe_make_save_dir(save_path)
-            self._save_restore_connector.save_to(self, str(save_path))  # downstream tasks expect str, not Path
+
+                    logging.info(
+                        f"Model {instance.__class__.__name__} was successfully restored from {restore_path}."
+                    )
+            finally:
+                cls._set_model_restore_state(is_being_restored=False)
+                os.chdir(cwd)
+
+        return instance
 
     @classmethod
     def restore_from(
@@ -244,8 +476,6 @@ class ModelPT(LightningModule, Model):
         map_location: Optional[torch.device] = None,
         strict: bool = True,
         return_config: bool = False,
-        save_restore_connector: SaveRestoreConnector = None,
-        trainer: Optional[Trainer] = None,
     ):
         """
         Restores model instance (weights and configuration) from .nemo file.
@@ -259,9 +489,6 @@ class ModelPT(LightningModule, Model):
             strict: Passed to load_state_dict. By default True.
             return_config: If set to true, will return just the underlying config of the restored
                 model as an OmegaConf DictConfig object without instantiating the model.
-            trainer: Optional, a pytorch lightning Trainer object that will be forwarded to the
-                instantiated model's constructor.
-            save_restore_connector (SaveRestoreConnector): Can be overrided to add custom save and restore logic.
 
             Example:
                 ```
@@ -272,31 +499,23 @@ class ModelPT(LightningModule, Model):
         Returns:
             An instance of type cls or its underlying config (if return_config is set).
         """
-
-        if save_restore_connector is None:
-            save_restore_connector = SaveRestoreConnector()
-
-        restore_path = os.path.abspath(os.path.expanduser(restore_path))
+        app_state = AppState()
         if not path.exists(restore_path):
             raise FileNotFoundError(f"Can't find {restore_path}")
 
-        app_state = AppState()
-        app_state.model_restore_path = restore_path
-
-        cls.update_save_restore_connector(save_restore_connector)
-        instance = cls._save_restore_connector.restore_from(
-            cls, restore_path, override_config_path, map_location, strict, return_config, trainer
+        app_state.model_restore_path = os.path.abspath(os.path.expanduser(restore_path))
+        return cls._default_restore_from(
+            restore_path, override_config_path, map_location, strict, return_config
         )
-        if isinstance(instance, ModelPT):
-            instance._save_restore_connector = save_restore_connector
-        return instance
 
     @classmethod
     def load_from_checkpoint(
         cls,
         checkpoint_path: str,
         *args,
-        map_location: Optional[Union[Dict[str, str], str, torch.device, int, Callable]] = None,
+        map_location: Optional[
+            Union[Dict[str, str], str, torch.device, int, Callable]
+        ] = None,
         hparams_file: Optional[str] = None,
         strict: bool = True,
         **kwargs,
@@ -370,7 +589,7 @@ class ModelPT(LightningModule, Model):
         self._validation_dl = None  # type: torch.utils.data.DataLoader
 
         # preserve config
-        self._update_dataset_config(dataset_name='validation', config=val_data_config)
+        self._update_dataset_config(dataset_name="validation", config=val_data_config)
 
         try:
             self._multi_dataset_mode = True
@@ -379,8 +598,13 @@ class ModelPT(LightningModule, Model):
             self._multi_dataset_mode = False
 
         if self._validation_names is None:
-            if self._validation_dl is not None and type(self._validation_dl) in [list, tuple]:
-                self._validation_names = ['val_{}_'.format(idx) for idx in range(len(self._validation_dl))]
+            if self._validation_dl is not None and type(self._validation_dl) in [
+                list,
+                tuple,
+            ]:
+                self._validation_names = [
+                    "val_{}_".format(idx) for idx in range(len(self._validation_dl))
+                ]
 
     def setup_multiple_test_data(self, test_data_config: Union[DictConfig, Dict]):
         """
@@ -395,7 +619,7 @@ class ModelPT(LightningModule, Model):
         self._test_dl = None  # type: torch.utils.data.DataLoader
 
         # preserve config
-        self._update_dataset_config(dataset_name='test', config=test_data_config)
+        self._update_dataset_config(dataset_name="test", config=test_data_config)
 
         try:
             self._multi_dataset_mode = True
@@ -405,9 +629,13 @@ class ModelPT(LightningModule, Model):
 
         if self._test_names is None:
             if self._test_dl is not None and type(self._test_dl) in [list, tuple]:
-                self._test_names = ['test_{}_'.format(idx) for idx in range(len(self._test_dl))]
+                self._test_names = [
+                    "test_{}_".format(idx) for idx in range(len(self._test_dl))
+                ]
 
-    def setup_optimization(self, optim_config: Optional[Union[DictConfig, Dict]] = None):
+    def setup_optimization(
+        self, optim_config: Optional[Union[DictConfig, Dict]] = None
+    ):
         """
         Prepares an optimizer from a string name and its optional config parameters.
 
@@ -424,12 +652,14 @@ class ModelPT(LightningModule, Model):
         # If config was not explicitly passed to us
         if optim_config is None:
             # See if internal config has `optim` namespace
-            if self._cfg is not None and hasattr(self._cfg, 'optim'):
+            if self._cfg is not None and hasattr(self._cfg, "optim"):
                 optim_config = self._cfg.optim
 
         # If config is still None, or internal config has no Optim, return without instantiation
         if optim_config is None:
-            logging.info('No optimizer config provided, therefore no optimizer was created')
+            logging.info(
+                "No optimizer config provided, therefore no optimizer was created"
+            )
             return
 
         else:
@@ -438,7 +668,7 @@ class ModelPT(LightningModule, Model):
                 optim_config = OmegaConf.create(optim_config)
 
             # See if internal config has `optim` namespace before preservation
-            if self._cfg is not None and hasattr(self._cfg, 'optim'):
+            if self._cfg is not None and hasattr(self._cfg, "optim"):
                 if self._cfg.optim is None:
                     self._cfg.optim = copy.deepcopy(optim_config)
                 else:
@@ -450,30 +680,44 @@ class ModelPT(LightningModule, Model):
             optim_config = OmegaConf.to_container(optim_config, resolve=True)
 
         if self._trainer is None:
-            logging.warning(f"Trainer wasn't specified in model constructor. Make sure that you really wanted it.")
+            logging.warning(
+                f"Trainer wasn't specified in model constructor. Make sure that you really wanted it."
+            )
 
-        if 'sched' in optim_config and self._trainer is not None:
+        if "sched" in optim_config and self._trainer is not None:
             if not isinstance(self._trainer.accumulate_grad_batches, int):
-                raise ValueError("We do not currently support gradient acculumation that is not an integer.")
-            if self._trainer.max_steps is None or self.trainer.max_steps < 0:
+                raise ValueError(
+                    "We do not currently support gradient acculumation that is not an integer."
+                )
+            if self._trainer.max_steps is None:
                 # Store information needed to calculate max_steps
-                optim_config['sched']['t_max_epochs'] = self._trainer.max_epochs
-                optim_config['sched']['t_accumulate_grad_batches'] = self._trainer.accumulate_grad_batches
-                optim_config['sched']['t_limit_train_batches'] = self._trainer.limit_train_batches
-                if self._trainer.accelerator is None:
-                    optim_config['sched']['t_num_workers'] = self._trainer.num_gpus or 1
-                elif self._trainer.accelerator == "ddp_cpu":
-                    optim_config['sched']['t_num_workers'] = self._trainer.num_processes * self._trainer.num_nodes
-                elif self._trainer.accelerator == "ddp":
-                    optim_config['sched']['t_num_workers'] = self._trainer.num_gpus * self._trainer.num_nodes
+                optim_config["sched"]["t_max_epochs"] = self._trainer.max_epochs
+                optim_config["sched"][
+                    "t_accumulate_grad_batches"
+                ] = self._trainer.accumulate_grad_batches
+                optim_config["sched"][
+                    "t_limit_train_batches"
+                ] = self._trainer.limit_train_batches
+                if self._trainer.distributed_backend is None:
+                    optim_config["sched"]["t_num_workers"] = self._trainer.num_gpus or 1
+                elif self._trainer.distributed_backend == "ddp_cpu":
+                    optim_config["sched"]["t_num_workers"] = (
+                        self._trainer.num_processes * self._trainer.num_nodes
+                    )
+                elif self._trainer.distributed_backend == "ddp":
+                    optim_config["sched"]["t_num_workers"] = (
+                        self._trainer.num_gpus * self._trainer.num_nodes
+                    )
                 else:
                     logging.warning(
-                        f"The lightning trainer received accelerator: {self._trainer.accelerator}. We "
+                        f"The lightning trainer received accelerator: {self._trainer.distributed_backend}. We "
                         "recommend to use 'ddp' instead."
                     )
-                    optim_config['sched']['t_num_workers'] = self._trainer.num_gpus * self._trainer.num_nodes
+                    optim_config["sched"]["t_num_workers"] = (
+                        self._trainer.num_gpus * self._trainer.num_nodes
+                    )
             else:
-                optim_config['sched']['max_steps'] = self._trainer.max_steps
+                optim_config["sched"]["max_steps"] = self._trainer.max_steps
 
         # Force into DictConfig from nested structure
         optim_config = OmegaConf.create(optim_config)
@@ -481,17 +725,17 @@ class ModelPT(LightningModule, Model):
         optim_config = OmegaConf.to_container(optim_config, resolve=True)
 
         # Extract scheduler config if inside optimizer config
-        if 'sched' in optim_config:
-            scheduler_config = optim_config.pop('sched')
+        if "sched" in optim_config:
+            scheduler_config = optim_config.pop("sched")
         else:
             scheduler_config = None
 
         # Check if caller provided optimizer name, default to Adam otherwise
-        optimizer_cls = optim_config.get('_target_', None)
+        optimizer_cls = optim_config.get("_target_", None)
 
         if optimizer_cls is None:
             # Try to get optimizer name for dynamic resolution, defaulting to Adam
-            optimizer_name = optim_config.get('name', 'adam')
+            optimizer_name = optim_config.get("name", "adam")
         else:
             if inspect.isclass(optimizer_cls):
                 optimizer_name = optimizer_cls.__name__.lower()
@@ -501,24 +745,24 @@ class ModelPT(LightningModule, Model):
 
         # We are guarenteed to have lr since it is required by the argparser
         # But maybe user forgot to pass it to this function
-        lr = optim_config.get('lr', None)
+        lr = optim_config.get("lr", None)
 
         # Check if caller has optimizer kwargs, default to empty dictionary
-        if 'args' in optim_config:
-            optimizer_args = optim_config.pop('args')
+        if "args" in optim_config:
+            optimizer_args = optim_config.pop("args")
             optimizer_args = optim.parse_optimizer_args(optimizer_name, optimizer_args)
         else:
             optimizer_args = copy.deepcopy(optim_config)
 
             # Remove extra parameters from optimizer_args nest
             # Assume all other parameters are to be passed into optimizer constructor
-            optimizer_args.pop('name', None)
-            optimizer_args.pop('cls', None)
-            optimizer_args.pop('lr', None)
+            optimizer_args.pop("name", None)
+            optimizer_args.pop("cls", None)
+            optimizer_args.pop("lr", None)
 
         # Adaptive schedulers don't need `lr`
         if lr is not None:
-            optimizer_args['lr'] = lr
+            optimizer_args["lr"] = lr
 
         # Actually instantiate the optimizer
         if optimizer_cls is not None:
@@ -531,9 +775,9 @@ class ModelPT(LightningModule, Model):
             else:
                 # Attempt class path resolution
                 try:
-                    optimizer_cls = OmegaConf.create({'_target_': optimizer_cls})
+                    optimizer_cls = OmegaConf.create({"_target_": optimizer_cls})
                     if lr is not None:
-                        optimizer_config = {'lr': lr}
+                        optimizer_config = {"lr": lr}
                     else:
                         optimizer_config = {}
                     optimizer_config.update(optimizer_args)
@@ -564,7 +808,9 @@ class ModelPT(LightningModule, Model):
 
         # Try to instantiate scheduler for optimizer
         self._scheduler = prepare_lr_scheduler(
-            optimizer=self._optimizer, scheduler_config=scheduler_config, train_dataloader=self._train_dl
+            optimizer=self._optimizer,
+            scheduler_config=scheduler_config,
+            train_dataloader=self._train_dl,
         )
 
         # Return the optimizer with/without scheduler
@@ -592,7 +838,10 @@ class ModelPT(LightningModule, Model):
             return self._test_dl
 
     def validation_epoch_end(
-        self, outputs: Union[List[Dict[str, torch.Tensor]], List[List[Dict[str, torch.Tensor]]]]
+        self,
+        outputs: Union[
+            List[Dict[str, torch.Tensor]], List[List[Dict[str, torch.Tensor]]]
+        ],
     ) -> Optional[Dict[str, Dict[str, torch.Tensor]]]:
         """
         Default DataLoader for Validation set which automatically supports multiple data loaders
@@ -622,32 +871,39 @@ class ModelPT(LightningModule, Model):
         if type(outputs[0]) == dict:
             output_dict = self.multi_validation_epoch_end(outputs, dataloader_idx=0)
 
-            if output_dict is not None and 'log' in output_dict:
-                self.log_dict(output_dict.pop('log'), on_epoch=True)
+            if output_dict is not None and "log" in output_dict:
+                self.log_dict(output_dict.pop("log"), on_epoch=True)
 
             return output_dict
 
         else:  # Case where we provide more than 1 data loader
-            output_dict = {'log': {}}
+            output_dict = {"log": {}}
 
             # The output is a list of list of dicts, outer list corresponds to dataloader idx
             for dataloader_idx, val_outputs in enumerate(outputs):
                 # Get prefix and dispatch call to multi epoch end
-                dataloader_prefix = self.get_validation_dataloader_prefix(dataloader_idx)
-                dataloader_logs = self.multi_validation_epoch_end(val_outputs, dataloader_idx=dataloader_idx)
+                dataloader_prefix = self.get_validation_dataloader_prefix(
+                    dataloader_idx
+                )
+                dataloader_logs = self.multi_validation_epoch_end(
+                    val_outputs, dataloader_idx=dataloader_idx
+                )
 
                 # If result was not provided, generate empty dict
                 dataloader_logs = dataloader_logs or {}
 
                 # Perform `val_loss` resolution first (if provided outside logs)
-                if 'val_loss' in dataloader_logs:
-                    if 'val_loss' not in output_dict and dataloader_idx == self._val_dl_idx:
-                        output_dict['val_loss'] = dataloader_logs['val_loss']
+                if "val_loss" in dataloader_logs:
+                    if (
+                        "val_loss" not in output_dict
+                        and dataloader_idx == self._val_dl_idx
+                    ):
+                        output_dict["val_loss"] = dataloader_logs["val_loss"]
 
                 # For every item in the result dictionary
                 for k, v in dataloader_logs.items():
                     # If the key is `log`
-                    if k == 'log':
+                    if k == "log":
                         # Parse every element of the log, and attach the prefix name of the data loader
                         log_dict = {}
 
@@ -655,7 +911,10 @@ class ModelPT(LightningModule, Model):
                             # If we are logging the metric, but dont provide it at result level,
                             # store it twice - once in log and once in result level.
                             # Also mark log with prefix name to avoid log level clash with other data loaders
-                            if k_log not in output_dict['log'] and dataloader_idx == self._val_dl_idx:
+                            if (
+                                k_log not in output_dict["log"]
+                                and dataloader_idx == self._val_dl_idx
+                            ):
                                 new_k_log = k_log
 
                                 # Also insert duplicate key with prefix for ease of comparison / avoid name clash
@@ -669,25 +928,28 @@ class ModelPT(LightningModule, Model):
                             log_dict[new_k_log] = v_log
 
                         # Update log storage of individual data loader
-                        output_logs = output_dict['log']
+                        output_logs = output_dict["log"]
                         output_logs.update(log_dict)
 
                         # Update global log storage
-                        output_dict['log'] = output_logs
+                        output_dict["log"] = output_logs
 
                     else:
                         # If any values are stored outside 'log', simply prefix name and store
                         new_k = dataloader_prefix + k
                         output_dict[new_k] = v
 
-            if 'log' in output_dict:
-                self.log_dict(output_dict.pop('log'), on_epoch=True)
+            if "log" in output_dict:
+                self.log_dict(output_dict.pop("log"), on_epoch=True)
 
             # return everything else
             return output_dict
 
     def test_epoch_end(
-        self, outputs: Union[List[Dict[str, torch.Tensor]], List[List[Dict[str, torch.Tensor]]]]
+        self,
+        outputs: Union[
+            List[Dict[str, torch.Tensor]], List[List[Dict[str, torch.Tensor]]]
+        ],
     ) -> Optional[Dict[str, Dict[str, torch.Tensor]]]:
         """
         Default DataLoader for Test set which automatically supports multiple data loaders
@@ -717,39 +979,47 @@ class ModelPT(LightningModule, Model):
         if type(outputs[0]) == dict:
             output_dict = self.multi_test_epoch_end(outputs, dataloader_idx=0)
 
-            if output_dict is not None and 'log' in output_dict:
-                self.log_dict(output_dict.pop('log'), on_epoch=True)
+            if output_dict is not None and "log" in output_dict:
+                self.log_dict(output_dict.pop("log"), on_epoch=True)
 
             return output_dict
 
         else:  # Case where we provide more than 1 data loader
-            output_dict = {'log': {}}
+            output_dict = {"log": {}}
 
             # The output is a list of list of dicts, outer list corresponds to dataloader idx
             for dataloader_idx, test_outputs in enumerate(outputs):
                 # Get prefix and dispatch call to multi epoch end
                 dataloader_prefix = self.get_test_dataloader_prefix(dataloader_idx)
-                dataloader_logs = self.multi_test_epoch_end(test_outputs, dataloader_idx=dataloader_idx)
+                dataloader_logs = self.multi_test_epoch_end(
+                    test_outputs, dataloader_idx=dataloader_idx
+                )
 
                 # If result was not provided, generate empty dict
                 dataloader_logs = dataloader_logs or {}
 
                 # Perform `test_loss` resolution first (if provided outside logs)
-                if 'test_loss' in dataloader_logs:
-                    if 'test_loss' not in output_dict and dataloader_idx == self._test_dl_idx:
-                        output_dict['test_loss'] = dataloader_logs['test_loss']
+                if "test_loss" in dataloader_logs:
+                    if (
+                        "test_loss" not in output_dict
+                        and dataloader_idx == self._test_dl_idx
+                    ):
+                        output_dict["test_loss"] = dataloader_logs["test_loss"]
 
                 # For every item in the result dictionary
                 for k, v in dataloader_logs.items():
                     # If the key is `log`
-                    if k == 'log':
+                    if k == "log":
                         # Parse every element of the log, and attach the prefix name of the data loader
                         log_dict = {}
                         for k_log, v_log in v.items():
                             # If we are logging the loss, but dont provide it at result level,
                             # store it twice - once in log and once in result level.
                             # Also mark log with prefix name to avoid log level clash with other data loaders
-                            if k_log not in output_dict['log'] and dataloader_idx == self._test_dl_idx:
+                            if (
+                                k_log not in output_dict["log"]
+                                and dataloader_idx == self._test_dl_idx
+                            ):
                                 new_k_log = k_log
 
                                 # Also insert duplicate key with prefix for ease of comparison / avoid name clash
@@ -762,19 +1032,19 @@ class ModelPT(LightningModule, Model):
                             log_dict[new_k_log] = v_log
 
                         # Update log storage of individual data loader
-                        output_logs = output_dict.get('log', {})
+                        output_logs = output_dict.get("log", {})
                         output_logs.update(log_dict)
 
                         # Update global log storage
-                        output_dict['log'] = output_logs
+                        output_dict["log"] = output_logs
 
                     else:
                         # If any values are stored outside 'log', simply prefix name and store
                         new_k = dataloader_prefix + k
                         output_dict[new_k] = v
 
-            if 'log' in output_dict:
-                self.log_dict(output_dict.pop('log'), on_epoch=True)
+            if "log" in output_dict:
+                self.log_dict(output_dict.pop("log"), on_epoch=True)
 
             # return everything else
             return output_dict
@@ -852,7 +1122,9 @@ class ModelPT(LightningModule, Model):
         return self._test_names[dataloader_idx]
 
     @rank_zero_only
-    def maybe_init_from_pretrained_checkpoint(self, cfg: OmegaConf, map_location: str = 'cpu'):
+    def maybe_init_from_pretrained_checkpoint(
+        self, cfg: OmegaConf, map_location: str = "cpu"
+    ):
         """
         Initializes a given model with the parameters obtained via specific config arguments.
         The state dict of the provided model will be updated with `strict=False` setting so as to prevent
@@ -875,7 +1147,11 @@ class ModelPT(LightningModule, Model):
                 (from the pretrained model or checkpoint) will be loaded.
 
         """
-        args = ['init_from_nemo_model', 'init_from_pretrained_model', 'init_from_ptl_ckpt']
+        args = [
+            "init_from_nemo_model",
+            "init_from_pretrained_model",
+            "init_from_ptl_ckpt",
+        ]
         arg_matches = [(1 if arg in cfg and arg is not None else 0) for arg in args]
 
         if sum(arg_matches) == 0:
@@ -888,31 +1164,36 @@ class ModelPT(LightningModule, Model):
                 f"Found : {[args[idx] for idx, arg_present in enumerate(arg_matches) if arg_present]}"
             )
 
-        if 'init_from_nemo_model' in cfg and cfg.init_from_nemo_model is not None:
+        if "init_from_nemo_model" in cfg and cfg.init_from_nemo_model is not None:
             with open_dict(cfg):
                 # Restore model
-                model_path = cfg.pop('init_from_nemo_model')
+                model_path = cfg.pop("init_from_nemo_model")
                 restored_model = self.restore_from(
-                    model_path, map_location=map_location, strict=cfg.get("init_strict", True)
+                    model_path, map_location=map_location, strict=True
                 )
 
                 # Restore checkpoint into current model
                 self.load_state_dict(restored_model.state_dict(), strict=False)
-                logging.info(f'Model checkpoint restored from nemo file with path : `{model_path}`')
+                logging.info(
+                    f"Model checkpoint restored from nemo file with path : `{model_path}`"
+                )
 
                 del restored_model
 
-        if 'init_from_pretrained_model' in cfg and cfg.init_from_pretrained_model is not None:
+        if (
+            "init_from_pretrained_model" in cfg
+            and cfg.init_from_pretrained_model is not None
+        ):
             with open_dict(cfg):
                 # Restore model
-                model_name = cfg.pop('init_from_pretrained_model')
+                model_name = cfg.pop("init_from_pretrained_model")
 
                 # Check if model is being resumed or not - only works if `Trainer` is attached to model
-                if hasattr(self, 'trainer') and self.trainer is not None:
+                if hasattr(self, "trainer") and self.trainer is not None:
                     trainer = self.trainer
                     if (
-                        hasattr(trainer, 'resume_from_checkpoint')
-                        and trainer.checkpoint_connector.resume_checkpoint_path is not None
+                        hasattr(trainer, "resume_from_checkpoint")
+                        and trainer.resume_from_checkpoint is not None
                     ):
                         logging.info(
                             "Model training is being resumed via Pytorch Lightning.\n"
@@ -921,24 +1202,28 @@ class ModelPT(LightningModule, Model):
                         return
 
                 restored_model = self.from_pretrained(
-                    model_name, map_location=map_location, strict=cfg.get("init_strict", True)
+                    model_name, map_location=map_location, strict=True
                 )
 
                 # Restore checkpoint into current model
                 self.load_state_dict(restored_model.state_dict(), strict=False)
-                logging.info(f'Model checkpoint restored from pretrained chackpoint with name : `{model_name}`')
+                logging.info(
+                    f"Model checkpoint restored from pretrained chackpoint with name : `{model_name}`"
+                )
 
                 del restored_model
 
-        if 'init_from_ptl_ckpt' in cfg and cfg.init_from_ptl_ckpt is not None:
+        if "init_from_ptl_ckpt" in cfg and cfg.init_from_ptl_ckpt is not None:
             with open_dict(cfg):
                 # Restore checkpoint
-                ckpt_path = cfg.pop('init_from_ptl_ckpt')
+                ckpt_path = cfg.pop("init_from_ptl_ckpt")
                 ckpt = torch.load(ckpt_path, map_location=map_location)
 
                 # Restore checkpoint into current model
-                self.load_state_dict(ckpt['state_dict'], strict=False)
-                logging.info(f'Model checkpoint restored from pytorch lightning chackpoint with path : `{ckpt_path}`')
+                self.load_state_dict(ckpt["state_dict"], strict=False)
+                logging.info(
+                    f"Model checkpoint restored from pytorch lightning chackpoint with path : `{ckpt_path}`"
+                )
 
                 del ckpt
 
@@ -949,24 +1234,20 @@ class ModelPT(LightningModule, Model):
         Args:
             stage: either 'fit' or 'test'
         """
-        if stage == 'fit':
+        if stage == "fit":
             # Update env variable to bypass multi gpu issue after training
             # This fix affects usage of trainer.test() after trainer.train()
             # If trainer.train() was done on multiple GPUs, then trainer.test()
             # will try to do ddp, even if its a new Trainer object with just 1 GPU.
             # Temporary patch to fix that
-            if 'PL_TRAINER_GPUS' in os.environ:
-                os.environ.pop('PL_TRAINER_GPUS')
+            if "PL_TRAINER_GPUS" in os.environ:
+                os.environ.pop("PL_TRAINER_GPUS")
 
         super().teardown(stage)
 
     @classmethod
     def extract_state_dict_from(
-        cls,
-        restore_path: str,
-        save_dir: str,
-        split_by_module: bool = False,
-        save_restore_connector: SaveRestoreConnector = None,
+        cls, restore_path: str, save_dir: str, split_by_module: bool = False
     ):
         """
         Extract the state dict(s) from a provided .nemo tarfile and save it to a directory.
@@ -976,7 +1257,6 @@ class ModelPT(LightningModule, Model):
             save_dir: directory in which the saved state dict(s) should be stored
             split_by_module: bool flag, which determins whether the output checkpoint should
                 be for the entire Model, or the individual module's that comprise the Model
-            save_restore_connector (SaveRestoreConnector): Can be overrided to add custom save and restore logic.
 
         Example:
             To convert the .nemo tarfile into a single Model level PyTorch checkpoint
@@ -1008,17 +1288,50 @@ class ModelPT(LightningModule, Model):
         Returns:
             The state dict that was loaded from the original .nemo checkpoint
         """
-        if save_restore_connector is None:
-            save_restore_connector = SaveRestoreConnector()
-
         if not path.exists(restore_path):
             raise FileExistsError(f"Can't find {restore_path}")
 
-        cls.update_save_restore_connector(save_restore_connector)
-        state_dict = cls._save_restore_connector.extract_state_dict_from(restore_path, save_dir, split_by_module)
+        cwd = os.getcwd()
+
+        save_dir = os.path.abspath(save_dir)
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                cls._unpack_nemo_file(path2file=restore_path, out_folder=tmpdir)
+                os.chdir(tmpdir)
+                model_weights = path.join(tmpdir, _MODEL_WEIGHTS)
+                state_dict = torch.load(model_weights)
+
+                if not split_by_module:
+                    filepath = os.path.join(save_dir, _MODEL_WEIGHTS)
+                    torch.save(state_dict, filepath)
+
+                else:
+                    key_set = set([key.split(".")[0] for key in state_dict.keys()])
+                    for primary_key in key_set:
+                        inner_keys = [
+                            key
+                            for key in state_dict.keys()
+                            if key.split(".")[0] == primary_key
+                        ]
+                        state_dict_subset = {
+                            ".".join(inner_key.split(".")[1:]): state_dict[inner_key]
+                            for inner_key in inner_keys
+                        }
+                        filepath = os.path.join(save_dir, f"{primary_key}.ckpt")
+                        torch.save(state_dict_subset, filepath)
+
+                logging.info(
+                    f"Checkpoints from {restore_path} were successfully extracted into {save_dir}."
+                )
+            finally:
+                os.chdir(cwd)
+
         return state_dict
 
-    def prepare_test(self, trainer: 'Trainer') -> bool:
+    def prepare_test(self, trainer: "Trainer") -> bool:
         """
         Helper method to check whether the model can safely be tested
         on a dataset after training (or loading a checkpoint).
@@ -1033,7 +1346,7 @@ class ModelPT(LightningModule, Model):
             bool which declares the model safe to test. Provides warnings if it has to
             return False to guide the user.
         """
-        if not hasattr(self._cfg, 'test_ds'):
+        if not hasattr(self._cfg, "test_ds"):
             logging.info("No `test_ds` config found within the manifest.")
             return False
 
@@ -1080,9 +1393,11 @@ class ModelPT(LightningModule, Model):
             if self._trainer.num_gpus and self._trainer.num_nodes:
                 app_state.world_size = self._trainer.num_gpus * self._trainer.num_nodes
         else:
-            logging.warning(f'World size can only be set by PyTorch Lightning Trainer.')
+            logging.warning(f"World size can only be set by PyTorch Lightning Trainer.")
 
-    def _update_dataset_config(self, dataset_name: str, config: Optional[Union[DictConfig, Dict]]):
+    def _update_dataset_config(
+        self, dataset_name: str, config: Optional[Union[DictConfig, Dict]]
+    ):
         """
         Update the config (if not None) of the dataset by given name.
         Preserves said config after updating.
@@ -1094,14 +1409,14 @@ class ModelPT(LightningModule, Model):
                 If dict is passed, it is cast into a DictConfig.
                 The internal config is updated with the passed config.
         """
-        if hasattr(self, '_multi_dataset_mode') and self._multi_dataset_mode is True:
+        if hasattr(self, "_multi_dataset_mode") and self._multi_dataset_mode is True:
             return
 
         if config is not None:
             if not isinstance(config, DictConfig):
                 config = OmegaConf.create(config)
 
-            if dataset_name in ['train', 'validation', 'test']:
+            if dataset_name in ["train", "validation", "test"]:
                 OmegaConf.set_struct(self.cfg, False)
 
                 key_name = dataset_name + "_ds"
@@ -1112,7 +1427,9 @@ class ModelPT(LightningModule, Model):
                 # Update hyper parameters by calling property setter
                 self.cfg = self._cfg
             else:
-                raise ValueError("`dataset_name` when updating config must be one of [train, validation, test]")
+                raise ValueError(
+                    "`dataset_name` when updating config must be one of [train, validation, test]"
+                )
 
     @property
     def num_weights(self):
@@ -1146,21 +1463,37 @@ class ModelPT(LightningModule, Model):
             Please create a new model using an updated config to properly update the model.
         """
         self._cfg = cfg
-        self._set_hparams(OmegaConf.create({'cfg': self._cfg}))
+        self._set_hparams(self._cfg)
+        self._hparams_initial = copy.deepcopy(self._hparams)
+
+    @staticmethod
+    def _make_nemo_file_from_folder(filename, source_dir):
+        with tarfile.open(filename, "w:gz") as tar:
+            tar.add(source_dir, arcname=".")
+
+    @staticmethod
+    def _unpack_nemo_file(path2file: str, out_folder: str) -> str:
+        if not path.exists(path2file):
+            raise FileNotFoundError(f"{path2file} does not exist")
+        tar = tarfile.open(path2file, "r:gz")
+        tar.extractall(path=out_folder)
+        tar.close()
+        return out_folder
 
     @staticmethod
     def _is_model_being_restored() -> bool:
-        app_state = AppState()
-        return app_state.is_model_being_restored
+        global _MODEL_IS_RESTORED
+        return _MODEL_IS_RESTORED
 
     @staticmethod
     def _set_model_restore_state(is_being_restored: bool, folder: str = None):
-        app_state = AppState()
-        app_state.is_model_being_restored = is_being_restored
-        app_state.nemo_file_folder = folder
+        global _MODEL_IS_RESTORED
+        global _NEMO_FILE_FOLDER
+        _MODEL_IS_RESTORED = is_being_restored
+        _NEMO_FILE_FOLDER = folder
 
     def _set_model_guid(self):
-        if not hasattr(self, 'model_guid'):
+        if not hasattr(self, "model_guid"):
             appstate = AppState()
 
             # Generate a unique uuid for the instance
@@ -1173,9 +1506,29 @@ class ModelPT(LightningModule, Model):
 
             appstate.register_model_guid(self.model_guid, restoration_path=restore_path)
 
-    @classmethod
-    def update_save_restore_connector(cls, save_restore_connector):
-        if hasattr(cls, '_save_restore_connector'):
-            cls._save_restore_connector = save_restore_connector
+    @staticmethod
+    def _is_restore_type_tarfile() -> bool:
+        """
+        Utility method that checks if the restore path of the underlying Model
+        is a tarfile (can be any valid archive)._MODEL_EFF_SAVE
+        """
+        app_state = AppState()
+
+        if app_state.model_restore_path is None:
+            return False
         else:
-            setattr(cls, '_save_restore_connector', save_restore_connector)
+            if app_state.model_restore_path:
+                if tarfile.is_tarfile(app_state.model_restore_path):
+                    return True
+            else:
+                return False
+
+    @staticmethod
+    def set_eff_save(use_eff_save: bool):
+        global _MODEL_EFF_SAVE
+        _MODEL_EFF_SAVE = use_eff_save
+
+    @staticmethod
+    def use_eff_save() -> bool:
+        global _MODEL_EFF_SAVE
+        return _MODEL_EFF_SAVE

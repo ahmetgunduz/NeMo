@@ -23,10 +23,10 @@ from nemo.collections.common.tokenizers import AutoTokenizer
 from nemo.core.classes import Dataset
 from nemo.core.neural_types import ChannelType, MaskType, NeuralType
 
-__all__ = ["Text2SparqlDataset"]
+__all__ = ["NeuralMachineTranslationDataset"]
 
 
-class Text2SparqlDataset(Dataset):
+class NeuralMachineTranslationDataset(Dataset):
     """A dataset class that converts raw data to a dataset that can be used by NeuralMachineTranslationModel.
 
     Args:

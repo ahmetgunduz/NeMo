@@ -39,16 +39,7 @@ from nemo.collections.asr.parts.numba.rnnt_loss.utils.cuda_utils import gpu_rnnt
 
 class GPURNNT:
     def __init__(
-        self,
-        minibatch: int,
-        maxT: int,
-        maxU: int,
-        alphabet_size: int,
-        workspace,
-        blank: int,
-        fastemit_lambda,
-        num_threads: int,
-        stream,
+        self, minibatch: int, maxT: int, maxU: int, alphabet_size: int, workspace, blank: int, num_threads: int, stream
     ):
         """
         Helper class to launch the CUDA Kernels to compute the Transducer Loss.
@@ -61,8 +52,6 @@ class GPURNNT:
             workspace: An allocated chunk of memory that will be sliced off and reshaped into required
                 blocks used as working memory.
             blank: Index of the RNNT blank token in the vocabulary. Generally the first or last token in the vocab.
-            fastemit_lambda: Float scaling factor for FastEmit regularization. Refer to
-                FastEmit: Low-latency Streaming ASR with Sequence-level Emission Regularization.
             num_threads: Number of OMP threads to launch.
             stream: Numba Cuda Stream.
         """
@@ -74,7 +63,6 @@ class GPURNNT:
             workspace
         )  # a flat vector of floatX numbers that represents allocated memory slices
         self.blank_ = blank
-        self.fastemit_lambda_ = fastemit_lambda
         self.num_threads_ = num_threads
         self.stream_ = stream  # type: cuda.cudadrv.driver.Stream
 
@@ -219,7 +207,6 @@ class GPURNNT:
                 self.maxU_,
                 self.alphabet_size_,
                 self.blank_,
-                self.fastemit_lambda_,
             )
 
         # // cost
@@ -228,9 +215,7 @@ class GPURNNT:
 
         # compute negative log likelihood.
         for mb in range(self.minibatch_):
-            # Scale llForward by FastEmit lambda
             costs[mb] = -costs[mb]
-            costs[mb] = (1.0 + self.fastemit_lambda_) * costs[mb]
 
         return global_constants.RNNTStatus.RNNT_STATUS_SUCCESS
 

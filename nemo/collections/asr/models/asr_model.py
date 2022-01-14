@@ -11,16 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import logging
 import os
-import re
 from abc import ABC, abstractmethod
 from typing import List, Optional, Union
 
 import torch
 from omegaconf import OmegaConf
 
-from nemo.core.classes import ModelPT, exportable, typecheck
+from nemo.core.classes import ModelPT
 from nemo.core.classes.exportable import Exportable
 from nemo.utils import model_utils
 
@@ -82,15 +80,12 @@ class ExportableEncDecModel(Exportable):
         return self.decoder
 
     def forward_for_export(self, input, length=None):
-        if hasattr(self.input_module, 'forward_for_export'):
-            encoder_output = self.input_module.forward_for_export(input, length)
-        else:
-            encoder_output = self.input_module(input, length)
+        encoder_output = self.input_module(input, length)
         if isinstance(encoder_output, tuple):
-            decoder_input = encoder_output[0]
+            return self.output_module(encoder_output[0])
         else:
-            decoder_input = encoder_output
-        if hasattr(self.output_module, 'forward_for_export'):
-            return self.output_module.forward_for_export(decoder_input)
-        else:
-            return self.output_module(decoder_input)
+            return self.output_module(encoder_output)
+
+    def _prepare_for_export(self, **kwargs):
+        self.input_module._prepare_for_export(**kwargs)
+        self.output_module._prepare_for_export(**kwargs)
