@@ -7,7 +7,7 @@ INSTALL_OPTION=${1:-"dev"}
 PIP=pip
 
 # echo 'Uninstalling stuff'
-# ${PIP} uninstall -y nemo_toolkit
+${PIP} uninstall -y nemo_toolkit
 # ${PIP} uninstall -y sacrebleu
 
 # # Kept for legacy purposes

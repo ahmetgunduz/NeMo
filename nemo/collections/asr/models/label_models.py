@@ -539,8 +539,8 @@ class EncDecSpeechRegressionModel(ModelPT, ExportableEncDecModel):
         self.task = None
 
         ## TODO: metric
-        # self._metric = MyMeanSquaredError()
-        self._metric = TopKClassificationAccuracy()
+        self._metric = MyMeanSquaredError()
+        # self._metric = TopKClassificationAccuracy()
 
     def __setup_dataloader_from_config(self, config: Optional[Dict]):
         if "augmentor" in config:
@@ -679,11 +679,10 @@ class EncDecSpeechRegressionModel(ModelPT, ExportableEncDecModel):
         self.log("loss", loss)
         self.log("learning_rate", self._optimizer.param_groups[0]["lr"])
 
-        self._metric(logits=logits, labels=labels)
-        top_k = self._metric.compute()
+        self._metric(logits, wers)
+        mse = self._metric.compute()
         self._metric.reset()
-        for i, top_i in enumerate(top_k):
-            self.log(f"training_batch_accuracy_top@{i}", top_i)
+        self.log(f"training_batch_metric", mse)
 
         return {"loss": loss}
 
@@ -694,39 +693,28 @@ class EncDecSpeechRegressionModel(ModelPT, ExportableEncDecModel):
             input_signal=audio_signal, input_signal_length=audio_signal_len
         )
         loss_value = self.loss(logits=logits, wers=wers, labels=labels)
-        acc_top_k = self._metric(logits=logits, labels=labels)
-        correct_counts, total_counts = (
-            self._metric.correct_counts_k,
-            self._metric.total_counts_k,
-        )
+        self._metric(logits, wers)
+        mse = self._metric.compute()
 
         return {
             "val_loss": loss_value,
-            "val_correct_counts": correct_counts,
-            "val_total_counts": total_counts,
-            "val_acc_top_k": acc_top_k,
+            "val_sum_squared_error": self._metric.sum_squared_error,
+            "val_total_samples_count": self._metric.total,
+            "val_metric": mse,
         }
 
     def multi_validation_epoch_end(self, outputs, dataloader_idx: int = 0):
         val_loss_mean = torch.stack([x["val_loss"] for x in outputs]).mean()
-        correct_counts = torch.stack([x["val_correct_counts"] for x in outputs]).sum(
-            axis=0
-        )
-        total_counts = torch.stack([x["val_total_counts"] for x in outputs]).sum(axis=0)
-
-        self._metric.correct_counts_k = correct_counts
-        self._metric.total_counts_k = total_counts
-        topk_scores = self._metric.compute()
+        mse = self._metric.compute()
         self._metric.reset()
 
         logging.info("val_loss: {:.3f}".format(val_loss_mean))
         self.log("val_loss", val_loss_mean)
-        for top_k, score in zip(self._metric.top_k, topk_scores):
-            self.log("val_epoch_accuracy_top@{}".format(top_k), score)
+        self.log("val_metric", mse)
 
         return {
             "val_loss": val_loss_mean,
-            "val_acc_top_k": topk_scores,
+            "val_metric": mse,
         }
 
     def test_step(self, batch, batch_idx, dataloader_idx: int = 0):
@@ -735,41 +723,28 @@ class EncDecSpeechRegressionModel(ModelPT, ExportableEncDecModel):
             input_signal=audio_signal, input_signal_length=audio_signal_len
         )
         loss_value = self.loss(logits=logits, wers=wers, labels=labels)
-        acc_top_k = self._metric(logits=logits, labels=labels)
-        correct_counts, total_counts = (
-            self._metric.correct_counts_k,
-            self._metric.total_counts_k,
-        )
+        self._metric(logits, labels)
+        mse = self._metric.compute()
 
         return {
             "test_loss": loss_value,
-            "test_correct_counts": correct_counts,
-            "test_total_counts": total_counts,
-            "test_acc_top_k": acc_top_k,
+            "test_sum_squared_error": self._metric.sum_squared_error,
+            "test_total_samples_count": self._metric.total,
+            "test_metric": mse,
         }
 
     def multi_test_epoch_end(self, outputs, dataloader_idx: int = 0):
         test_loss_mean = torch.stack([x["test_loss"] for x in outputs]).mean()
-        correct_counts = torch.stack([x["test_correct_counts"] for x in outputs]).sum(
-            axis=0
-        )
-        total_counts = torch.stack([x["test_total_counts"] for x in outputs]).sum(
-            axis=0
-        )
-
-        self._metric.correct_counts_k = correct_counts
-        self._metric.total_counts_k = total_counts
-        topk_scores = self._metric.compute()
+        mse = self._metric.compute()
         self._metric.reset()
 
         logging.info("test_loss: {:.3f}".format(test_loss_mean))
-        self.log("test_loss", test_loss_mean)
-        for top_k, score in zip(self._metric.top_k, topk_scores):
-            self.log("test_epoch_accuracy_top@{}".format(top_k), score)
+        self.log("test_loss", val_loss_mean)
+        self.log("test_metric", mse)
 
         return {
             "test_loss": test_loss_mean,
-            "test_acc_top_k": topk_scores,
+            "test_metric": mse,
         }
 
     def setup_finetune_model(self, model_config: DictConfig):
